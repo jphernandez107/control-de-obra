@@ -195,7 +195,7 @@ export type AssistantBlock =
       context: { supplierId: ID; amount: number; date?: ISODate; method?: PaymentMethod; documentId?: ID };
     }
   | { type: "read_error"; fileName: string }
-  /** AI provider/document failure (codes: AI_NOT_CONFIGURED, AI_PROVIDER_UNAVAILABLE, AI_QUOTA_EXCEEDED, AI_INVALID_RESPONSE, AI_DOCUMENT_UNSUPPORTED, AI_INTERPRETATION_AMBIGUOUS). */
+  /** AI provider/document failure (codes: see AI_ERROR_CODES in server/ai/errors.ts). */
   | { type: "ai_error"; code: string; message: string; hint?: string }
   | {
       type: "balance";

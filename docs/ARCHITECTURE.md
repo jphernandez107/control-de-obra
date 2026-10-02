@@ -38,7 +38,7 @@ React UI ──► src/services/api (HTTP) ──► server/http/app.ts (Hono: v
 
 ## AI pipeline (write safety)
 
-The AI is not the source of truth: it classifies what the user means and extracts what was said or printed. Every record, match and figure comes from the application. The Cloudflare handoff is described in [AI_HANDOFF.md](AI_HANDOFF.md).
+The AI is not the source of truth: it classifies what the user means and extracts what was said or printed. Every record, match and figure comes from the application. The Workers AI adapter and its free-tier safeguards are described in the README ([AI in production](../README.md#ai-in-production-workers-ai)).
 
 ```
 message / document
@@ -65,8 +65,8 @@ message / document
 ### Providers (`AI_PROVIDER`)
 
 - `mock` — `MockAIProvider`: deterministic Spanish rules for the canonical phrasings, follow-ups and clarifications; documents via `LocalDocumentContentExtractor` (text of simple PDFs; photos yield no text). Local default and used by tests.
-- `cloudflare` — `CloudflareAIProvider` / `CloudflareDocumentContentExtractor` (`ai/cloudflare.ts`): integration point for Workers AI, currently placeholders that report `AI_NOT_CONFIGURED`.
-- `disabled` — `DisabledAIProvider`: production default until Workers AI is connected.
+- `cloudflare` — `CloudflareAIProvider` / `CloudflareDocumentContentExtractor` (`ai/cloudflare.ts`): Workers AI through the `AI` binding. Tool calling with one proposal tool per intent, validated by the same schemas. PDFs go through `toMarkdown`, photos through a vision transcription. Readings are cached in `document_extractions` (`ai/extraction-cache.ts`). Binding errors are mapped to `AIError` codes. Production uses this.
+- `disabled` — `DisabledAIProvider`: AI switched off (`AI_PROVIDER=disabled`).
 
 No external AI API is called by this codebase.
 
@@ -86,7 +86,7 @@ Deployed as one Worker (`server/worker.ts`, config in `wrangler.jsonc`); see the
 - **R2**: `R2Storage` (`server/storage/r2.ts`) implements `DocumentStorage`; without a `DOCUMENTS` binding, `UnavailableStorage` makes uploads fail with a Spanish message. Production passes `documentLimits` (size, uploads per day, total bytes) to `storeDocument`.
 - **Static assets**: the Vite build in `dist/`, SPA fallback via `not_found_handling: "single-page-application"`, `run_worker_first: true` so the login gate covers every path.
 - **Identity**: `AUTH_MODE` `basic` — `basicAuthEmail` checks the `Authorization` header against SHA-256 hashes in the `APP_USERS` secret; the e-mail must match a `users` row with `can_login`. The Worker accepts only this mode (a bare Access e-mail header would be spoofable without JWT validation).
-- **AI**: `AI_PROVIDER=disabled` → `DisabledAIProvider`; the assistant shows «La función de IA todavía no está configurada. No se guardó nada.» and the composer shows the same notice. Connecting Workers AI means implementing the placeholders in `server/ai/cloudflare.ts`, adding the `AI` binding and setting `AI_PROVIDER=cloudflare` (see [AI_HANDOFF.md](AI_HANDOFF.md)).
+- **AI**: `AI_PROVIDER=cloudflare` with the `AI` binding. Models come from `AI_TEXT_MODEL` / `AI_VISION_MODEL`, Free allocation only. Usage is guarded per user (rate limit and duplicate check in `AssistantService`). Setting `AI_PROVIDER=disabled` turns it off without a code change.
 - **Bootstrap**: `server/bootstrap.ts` writes idempotent SQL for the project, login users and units only.
 
 ## Known limitations
@@ -94,9 +94,9 @@ Deployed as one Worker (`server/worker.ts`, config in `wrangler.jsonc`); see the
 - Single project and a small team; no roles/permissions beyond the identity boundary.
 - Read models load the whole project working set per request (fine for one house; revisit for large datasets).
 - Unit conversions are modeled and applied in comparisons, but there is no UI to manage them (seeded for steel bars).
-- The mock provider understands common phrasings and simple text PDFs only; photos and scanned PDFs need a real document extractor (Workers AI, pending). HEIC files are stored but not analyzed.
-- The Workers AI adapters are placeholders: production AI stays disabled until they are implemented and a binding is added.
-- Extracted document text is not cached; re-analyzing a document extracts it again.
+- The mock provider understands common phrasings and simple text PDFs only. In production, scanned PDFs without a text layer are not read (`toMarkdown` returns no text), so the assistant asks for a photo. HEIC files are stored but not analyzed.
+- Workers AI quality depends on the free models (GLM-4.7-Flash, Gemma 4). The adapter corrects a few known slips deterministically (`correctKnownSlips`), and every proposal is still reviewed by the user.
+- Workers AI usage is limited to 10,000 neurons/day on Workers Free (about 300 messages). When it runs out, the assistant shows the quota message until 00:00 UTC.
 - No AI intent for correcting an existing order by chat; corrections use the *Corregir pedido* sheet (audited).
 - Deliveries without a known order are supported by the domain command, but neither the HTTP endpoint nor the assistant creates them yet (the assistant asks for the order).
 - Computation upload accepts CSV/XLSX (first sheet); PDF computations are not parsed.
@@ -119,7 +119,7 @@ Automated in `tests/` (`npm test`, 55 tests, real SQLite + HTTP app + mock provi
 | Integrity | FK and CHECK constraints enforced inside batches; negative amounts rejected; allocations above payment / order balance / to another supplier rejected; later allocation of an unallocated payment keeps supplier balance; undo voids and keeps audit; voiding an order with deliveries blocked; price correction audited and enables "pagar completo"; quantity below delivered rejected; read queries write nothing; CSV computation import with alias match and new material |
 | **F** document fixture | extracted text (fixture extractor, photo with no OCR) → classified as remito → delivery proposal for order 38 with remito number and date → nothing written before confirm → delivery + document link after; unclassifiable text → no proposal |
 | AI contract | valid output parsed; unknown intents, amounts as text, negative quantities, bad dates, missing fields → `AI_INVALID_RESPONSE`, no pending action stored |
-| AI states | `disabled` and `cloudflare` (placeholder) → `AI_NOT_CONFIGURED`; quota → `AI_QUOTA_EXCEEDED`; outage → `AI_PROVIDER_UNAVAILABLE`; the rest of the API keeps serving |
+| AI states | `disabled` or a missing binding → `AI_NOT_CONFIGURED`; quota → `AI_QUOTA_EXCEEDED`; paid-only or unknown model → `AI_MODEL_UNAVAILABLE`; capacity/timeouts → `AI_TEMPORARILY_UNAVAILABLE`; outage → `AI_PROVIDER_UNAVAILABLE`; unreadable document → `AI_DOCUMENT_CONVERSION_FAILED`; the rest of the API keeps serving |
 | Matching | «hierro del 12», «acero del 12», «barra Ø12», «acero 12 mm», «Ø12», «barras del 12» → Acero Ø12 (without aliases); «acero» → candidates; unknown supplier → new, not created |
 | Queries & context | read-only queries match seed figures and write nothing; «¿Cómo viene el pedido 38?» → «¿Y cuánto falta pagar?» answers $1.482.340; ambiguous follow-up asks «¿De qué pedido?»; «Llegó todo lo pendiente» / «Pagalo completo» use the focused order |
 | Revalidation | pay-complete proposal refused as stale after a manual payment, refreshed amount confirmed; stale «todo lo pendiente» refreshed; blocked proposal (amount 0) cannot be confirmed; audit metadata `origin: "ai"` + `pendingActionId` |

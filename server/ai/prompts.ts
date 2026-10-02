@@ -13,19 +13,22 @@ export interface PromptMessages {
   jsonSchema: Record<string, unknown>;
 }
 
-export const INTERPRETATION_SYSTEM_PROMPT = `Sos el asistente de una obra de construcción residencial en Córdoba, Argentina ("Casa Córdoba").
-Tu tarea es CLASIFICAR la intención del usuario y EXTRAER los datos que dijo o que figuran en un comprobante. No inventes nada.
+/** Bumped whenever the wording below changes; logged with each Workers AI call. */
+export const PROMPT_VERSION = "2026-10-02.6";
 
-Respondé solo con JSON que cumpla el esquema: { "interpretation": {...}, "document": {...} | null }.
+const INTRO = `Sos el asistente de una obra de construcción residencial en Córdoba, Argentina ("Casa Córdoba").
+Tu tarea es CLASIFICAR la intención del usuario y EXTRAER los datos que dijo o que figuran en un comprobante. No inventes nada.`;
 
-Reglas generales:
+const RULES = `Reglas generales:
 - Devolvé solo lo dicho o inequívoco. Si un dato falta, usá null (o lista vacía / false). Nunca completes huecos con suposiciones.
 - No calcules saldos, totales pendientes ni cantidades pendientes: la aplicación los calcula con su base de datos.
 - "material": copiá cómo se nombró ("barras del 12", "hierro del 10", "acero 12 mm", "cemento"). No lo normalices.
 - "quantity": número; "unit": la palabra de unidad tal como aparece ("barras", "bolsas", "m3", "kg").
 - Importes en pesos como número (500.000 → 500000; "400 mil" → 400000; "1,5 millones" → 1500000).
 - Fechas como YYYY-MM-DD; "hoy"/"ayer" son relativos a la fecha de hoy indicada.
-- "confidence" entre 0 y 1. "note": una frase breve en español solo si algo es dudoso.
+- "confidence" entre 0 y 1. "note": una frase breve en español solo si hay una duda concreta; si no, null. No repitas lo que dijo el usuario.
+- "paymentMethod" solo si se dijo (transferencia, efectivo, cheque); si no, null.
+- Referencias ("paymentReference", "deliveryReference", "orderReference"): solo números que figuran en el texto. El nombre del archivo nunca es una referencia.
 - Este sistema NO maneja facturas. Nunca uses esa palabra ni clasifiques nada como factura.
 
 Intenciones ("intent"):
@@ -33,10 +36,13 @@ Intenciones ("intent"):
 - register_delivery: llegó material, con cantidades. Ej.: "Del pedido 38 llegaron las 20 barras del 12".
 - complete_order_delivery: llegó todo lo pendiente / el resto de un pedido. No listes cantidades.
 - create_supplier_payment: se pagó un importe a un proveedor (a cuenta corriente, a un pedido o repartido entre pedidos).
-- pay_order_balance: "pagamos completo el pedido X". No pongas importe: la aplicación calcula el saldo.
+  Si se dice que se pagó pero no cuánto ("le pagamos al corralón"), igual es create_supplier_payment con amount null: la aplicación pregunta el importe.
+- pay_order_balance: "pagamos completo el pedido X", SIN importe. No pongas importe: la aplicación calcula el saldo.
+  Si el mensaje o el comprobante muestra un importe, NO es pay_order_balance: es create_supplier_payment con ese importe (y orderReference si lo indica).
 - allocate_payment: imputar a un pedido un pago ya registrado que estaba sin imputar.
 - ask_project_question: una pregunta sobre la obra. Elegí "query":
-  get_supplier_summary (saldo/cuenta corriente de un proveedor), list_supplier_balances (cuánto debemos en total),
+  get_supplier_summary (saldo/cuenta corriente de un proveedor; si la pregunta nombra un proveedor, usá esta con "supplier"),
+  list_supplier_balances (cuánto debemos en total, sin nombrar proveedor),
   get_order_summary (estado, entregas o saldo de un pedido; "aspect" = delivery | payment | overall),
   list_orders_pending_delivery, list_delivered_unpaid_orders, get_material_summary (cuánto llevamos pedido de un material),
   get_computation_variance (si nos pasamos del cómputo), list_unallocated_payments, o general.
@@ -47,6 +53,48 @@ Intenciones ("intent"):
 Documentos: "document.type" = order (comprobante de pedido, presupuesto aceptado, nota de venta), delivery (remito),
 payment (comprobante de transferencia, recibo de pago) o unknown. Si el texto no permite leer cantidades o importes, usá
 confidence baja y unknown. Un remito suele indicar el pedido ("Pedido N°"); un comprobante de pago, el importe y la fecha.`;
+
+export const INTERPRETATION_SYSTEM_PROMPT = `${INTRO}
+
+Respondé solo con JSON que cumpla el esquema: { "interpretation": {...}, "document": {...} | null }.
+
+${RULES}`;
+
+/** Tool name the model calls for each intent. Tools only describe a proposal; nothing runs until the user confirms. */
+export const INTENT_TOOL_NAMES = {
+  create_order: "propose_create_order",
+  register_delivery: "propose_register_delivery",
+  complete_order_delivery: "propose_complete_order_delivery",
+  create_supplier_payment: "propose_supplier_payment",
+  pay_order_balance: "propose_order_payment",
+  allocate_payment: "propose_payment_allocation",
+  ask_project_question: "ask_project_question",
+  clarification_required: "request_clarification",
+  unknown: "report_unrelated",
+} as const;
+
+/** System prompt for models that answer through tool calls (Workers AI). Same rules as the JSON variant. */
+export const TOOL_INTERPRETATION_SYSTEM_PROMPT = `${INTRO}
+El usuario habla en español; cualquier texto tuyo ("note", "question") va en español, breve y operativo.
+
+Respondé SIEMPRE llamando exactamente UNA herramienta, con los argumentos que pide.
+- Las herramientas solo PROPONEN una operación: nada se guarda hasta que el usuario la revisa y la confirma en la aplicación.
+- Los datos del proyecto que te da la aplicación (proveedores, materiales, pedidos abiertos) son la fuente de verdad.
+- No inventes proveedores, materiales, cantidades, precios, importes, fechas ni números de pedido. Lo que no se dijo queda en null.
+- Si dudás, bajá "confidence" y explicá la duda en "note". Si falta algo indispensable, usá request_clarification.
+- Este sistema no maneja facturas.
+
+Herramienta para cada intención: ${Object.entries(INTENT_TOOL_NAMES)
+  .map(([intent, tool]) => `${tool} = ${intent}`)
+  .join("; ")}.
+
+${RULES}`;
+
+export const DOCUMENT_TOOL_NOTE = `Estás leyendo un comprobante adjunto. En la herramienta completá también "document_type" (order, delivery, payment o unknown) y "document_confidence" (0 a 1).
+- Nota de pedido, nota de venta o presupuesto aceptado → order, con propose_create_order.
+- Remito → delivery, con propose_register_delivery.
+- Comprobante de transferencia, recibo o constancia de pago → payment, con propose_supplier_payment (importe, destinatario como "supplier", fecha y número de operación si figuran).
+Solo si no es ninguno de esos usá report_unrelated con document_type unknown.`;
 
 function projectText(c: AIProjectContext): string {
   return [
@@ -99,6 +147,8 @@ No calcules saldos nuevos ni uses cifras de la conversación. Si los datos no al
 Nunca menciones facturas: este sistema no maneja facturas.
 Respondé con JSON: { "text": "..." }.`;
 
+export const TOOL_ANSWER_SYSTEM_PROMPT = ANSWER_SYSTEM_PROMPT.replace('Respondé con JSON: { "text": "..." }.', "Respondé llamando a la herramienta reply con el texto de la respuesta (como máximo 4 oraciones).");
+
 export function answerPrompt(input: AIQuestionInput): PromptMessages {
   return {
     system: ANSWER_SYSTEM_PROMPT,
@@ -106,3 +156,9 @@ export function answerPrompt(input: AIQuestionInput): PromptMessages {
     jsonSchema: answerJsonSchema(),
   };
 }
+
+/** Vision model instruction for photos of receipts: transcribe only, interpretation happens afterwards. */
+export const IMAGE_TRANSCRIPTION_PROMPT = `Transcribí en Markdown todo el texto visible de esta imagen de un comprobante de obra (pedido, nota de venta, remito o comprobante de pago).
+Conservá exactamente números, cantidades, unidades, precios, importes, fechas, nombres y números de pedido o de remito. Las tablas van como tablas Markdown.
+No interpretes, no resumas, no completes ni corrijas nada. Lo que no se lea bien va como [ilegible].
+Si la imagen no contiene texto legible, respondé solo: SIN_TEXTO`;

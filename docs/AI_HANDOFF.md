@@ -1,5 +1,10 @@
 # AI handoff: connecting Cloudflare Workers AI
 
+> **Status (2026-10-02): done.** `server/ai/cloudflare.ts` implements both adapters, the `AI` binding is in
+> `wrangler.jsonc`, and production runs `AI_PROVIDER=cloudflare` with `@cf/zai-org/glm-4.7-flash` (text) and
+> `@cf/google/gemma-4-26b-a4b-it` (photos). Operation, limits and costs: README → *AI in production*. The notes
+> below are kept as the contract the adapter follows.
+
 This is for the agent that has Cloudflare access. The application side of the AI
 assistant is complete. It runs end to end with the deterministic `MockAIProvider`
 (`AI_PROVIDER=mock`), and production currently runs with `AI_PROVIDER=disabled`.

@@ -403,6 +403,26 @@ export const messageAttachments = sqliteTable("message_attachments", {
 });
 
 /**
+ * Text read from a stored document by an AI extractor, so the same file is
+ * never converted twice. Keyed by content hash: documents are immutable, and a
+ * re-upload of identical bytes reuses the reading.
+ */
+export const documentExtractions = sqliteTable(
+  "document_extractions",
+  {
+    id: id(),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    documentId: text("document_id").notNull().references(() => documents.id),
+    sha256: text("sha256").notNull(),
+    extractor: text("extractor").notNull(),
+    format: text("format").notNull(), // markdown | text
+    text: text("text").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("document_extractions_sha_uq").on(t.projectId, t.sha256)],
+);
+
+/**
  * Pending AI action: a structured write proposal produced from a message or
  * document. Nothing reaches the domain tables until a user confirms it.
  * (Table name kept from the first schema; the code calls it PendingAIAction.)

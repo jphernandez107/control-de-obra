@@ -1,4 +1,4 @@
-import type { D1Database, ExecutionContext, Fetcher, R2Bucket } from "@cloudflare/workers-types";
+import type { Ai, D1Database, ExecutionContext, Fetcher, R2Bucket } from "@cloudflare/workers-types";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { getAIProvider, getDocumentContentExtractor, parseAIProviderId, type AIConfig } from "./ai/factory";
@@ -20,9 +20,15 @@ export interface Env {
   APP_USERS?: string;
   /** mock | cloudflare | disabled (default). */
   AI_PROVIDER?: string;
+  /** Workers AI text model (interpretation and answers). AI_MODEL is the older name. */
+  AI_TEXT_MODEL?: string;
   AI_MODEL?: string;
-  /** Workers AI binding. Not configured yet: the Cloudflare integration adds it in wrangler.jsonc (see docs/AI_HANDOFF.md). */
-  AI?: unknown;
+  /** Workers AI vision model for photos of receipts; optional. */
+  AI_VISION_MODEL?: string;
+  AI_MAX_DOCUMENT_MB?: string;
+  AI_MAX_MESSAGES_PER_MINUTE?: string;
+  /** Workers AI binding (`"ai": { "binding": "AI" }` in wrangler.jsonc). */
+  AI?: Ai;
   PROJECT_ID?: string;
   MAX_UPLOAD_MB?: string;
   MAX_UPLOADS_PER_DAY?: string;
@@ -69,7 +75,13 @@ async function buildApp(env: Env): Promise<App | null> {
     : await db.select().from(schema.projects).limit(1);
   if (!project) return null;
   const auth: AuthConfig = authConfig(env);
-  const aiConfig: AIConfig = { provider: parseAIProviderId(env.AI_PROVIDER, "disabled"), model: env.AI_MODEL || undefined, cloudflareBinding: env.AI };
+  const aiConfig: AIConfig = {
+    provider: parseAIProviderId(env.AI_PROVIDER, "disabled"),
+    model: env.AI_TEXT_MODEL || env.AI_MODEL || undefined,
+    visionModel: env.AI_VISION_MODEL || undefined,
+    maxDocumentBytes: intEnv(env.AI_MAX_DOCUMENT_MB, 4) * 1024 * 1024,
+    cloudflareBinding: env.AI,
+  };
   const ai = getAIProvider(aiConfig);
   const app = createApp({
     db,
@@ -83,6 +95,8 @@ async function buildApp(env: Env): Promise<App | null> {
       maxUploadsPerDay: intEnv(env.MAX_UPLOADS_PER_DAY, 100),
       maxTotalBytes: intEnv(env.MAX_DOCUMENTS_TOTAL_MB, 2048) * 1024 * 1024,
     },
+    cacheDocumentExtractions: true,
+    assistantLimits: { maxMessagesPerMinute: intEnv(env.AI_MAX_MESSAGES_PER_MINUTE, 8), duplicateWindowMs: 20_000 },
   });
   cached = { app };
   return app;
