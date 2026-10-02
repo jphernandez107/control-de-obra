@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `npm run cf:dev` (local workerd). Never commit .dev.vars.
+# Login for the local Worker: {"email": "<sha256 hex of the password>"}
+#   printf %s 'clave-local' | shasum -a 256
+APP_USERS={"prueba@local.test":"<sha256-hex>"}
+# AI_PROVIDER=mock

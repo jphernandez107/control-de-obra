@@ -15,7 +15,12 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=.env server/migrate.ts",
     "db:seed": "tsx --env-file-if-exists=.env server/seed.ts",
-    "samples": "tsx server/dev/samples.ts"
+    "samples": "tsx server/dev/samples.ts",
+    "cf:dev": "npm run build && wrangler dev",
+    "cf:deploy": "npm run build && wrangler deploy",
+    "cf:migrate": "wrangler d1 migrations apply casa-cordoba --remote",
+    "cf:bootstrap": "tsx server/bootstrap.ts",
+    "cf:logs": "wrangler tail casa-cordoba"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
@@ -35,6 +40,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261002.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
@@ -46,6 +52,7 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.2",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
   }
 }

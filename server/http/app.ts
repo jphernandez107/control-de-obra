@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { AppDb } from "../db/client";
 import type { AIProvider } from "../ai/provider";
@@ -9,7 +10,7 @@ import { AssistantService } from "../services/assistant";
 import * as commands from "../services/commands";
 import { previewComputation, readComputationSheet } from "../services/computation-import";
 import type { Actor, CommandContext } from "../services/context";
-import { getDocument, readDocumentBytes, storeDocument } from "../services/documents";
+import { getDocument, MAX_DOCUMENT_BYTES, readDocumentBytes, storeDocument, type DocumentLimits } from "../services/documents";
 import * as queries from "../services/queries";
 import { resolveActor, type AuthConfig } from "./auth";
 
@@ -23,6 +24,7 @@ export interface AppDeps {
   ai: AIProvider;
   projectId: string;
   auth: AuthConfig;
+  documentLimits?: DocumentLimits;
   now?: () => Date;
 }
 
@@ -135,6 +137,12 @@ export function createApp(deps: AppDeps) {
     c.set("actor", await resolveActor(deps.db, deps.projectId, deps.auth, c.req.raw.headers));
     await next();
   });
+
+  const jsonLimit = bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (c) => c.json({ error: { code: "validation", message: "La solicitud es demasiado grande." } }, 413),
+  });
+  app.use("*", (c, next) => (c.req.path === "/api/documents" ? next() : jsonLimit(c, next)));
 
   // ---------------------------------------------------------------- session
   app.get("/session", async (c) => {
@@ -271,13 +279,18 @@ export function createApp(deps: AppDeps) {
   });
 
   // ---------------------------------------------------------------- documents
-  app.post("/documents", async (c) => {
+  const uploadLimit = bodyLimit({
+    // Multipart framing adds a little on top of the file itself.
+    maxSize: (deps.documentLimits?.maxBytes ?? MAX_DOCUMENT_BYTES) + 64 * 1024,
+    onError: (c) => c.json({ error: { code: "unsupported_document", message: "El archivo es demasiado grande." } }, 413),
+  });
+  app.post("/documents", uploadLimit, async (c) => {
     const form = await c.req.parseBody();
     const file = form.file;
     if (!(file instanceof File)) throw new DomainError("validation", "Falta el archivo.");
     const kind = typeof form.kind === "string" && ["order_proof", "delivery_proof", "payment_proof", "computation", "other"].includes(form.kind) ? (form.kind as commands.DocumentKindCode) : "other";
     const row = await storeDocument(
-      { db: deps.db, storage: deps.storage, projectId: deps.projectId, userId: c.get("actor").userId, now },
+      { db: deps.db, storage: deps.storage, projectId: deps.projectId, userId: c.get("actor").userId, now, limits: deps.documentLimits },
       { fileName: file.name || "documento", mimeType: file.type, data: new Uint8Array(await file.arrayBuffer()), kind },
     );
     return c.json({ id: row.id, fileName: row.fileName, mimeType: row.mimeType, sizeBytes: row.sizeBytes, url: `/api/documents/${row.id}/file` }, 201);

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppDb } from "../db/client";
 import * as t from "../db/schema";
 import { DomainError } from "../domain/errors";
@@ -7,6 +7,13 @@ import { newId } from "./context";
 import type { DocumentKindCode } from "./commands";
 
 export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
+
+/** Guards against runaway storage usage; production sets all three conservatively. */
+export interface DocumentLimits {
+  maxBytes: number;
+  maxUploadsPerDay?: number;
+  maxTotalBytes?: number;
+}
 
 const EXTENSION_TYPES: Record<string, string> = {
   pdf: "application/pdf",
@@ -67,9 +74,13 @@ export interface UploadInput {
  * changes no business record: the document is linked (and audited) when the
  * record it supports is confirmed.
  */
-export async function storeDocument(deps: { db: AppDb; storage: DocumentStorage; projectId: string; userId: string; now: () => Date }, input: UploadInput) {
+export async function storeDocument(
+  deps: { db: AppDb; storage: DocumentStorage; projectId: string; userId: string; now: () => Date; limits?: DocumentLimits },
+  input: UploadInput,
+) {
+  const limits = deps.limits ?? { maxBytes: MAX_DOCUMENT_BYTES };
   if (!input.data.byteLength) throw new DomainError("unsupported_document", "El archivo está vacío.");
-  if (input.data.byteLength > MAX_DOCUMENT_BYTES) throw new DomainError("unsupported_document", "El archivo supera los 20 MB.");
+  if (input.data.byteLength > limits.maxBytes) throw new DomainError("unsupported_document", `El archivo supera los ${Math.floor(limits.maxBytes / (1024 * 1024))} MB.`);
   const declared = detectMimeType(input.fileName, input.mimeType);
   const sniffed = sniff(input.data);
   const isText = declared === "text/csv";
@@ -77,8 +88,9 @@ export async function storeDocument(deps: { db: AppDb; storage: DocumentStorage;
   if (!ACCEPTED.has(mimeType) || (!isText && !sniffed)) {
     throw new DomainError("unsupported_document", "Formato no soportado. Sube un PDF, una foto (JPG, PNG, WEBP o HEIC) o una planilla CSV/XLSX.");
   }
-  const id = newId();
   const now = deps.now();
+  await checkStorageQuota(deps.db, deps.projectId, limits, input.data.byteLength, now);
+  const id = newId();
   const key = `${deps.projectId}/${now.toISOString().slice(0, 7)}/${id}-${safeName(input.fileName)}`;
   await deps.storage.put(key, input.data, mimeType);
   const row = {
@@ -102,6 +114,24 @@ export async function storeDocument(deps: { db: AppDb; storage: DocumentStorage;
     throw new DomainError("persistence", "No se pudo guardar el documento.", String(err));
   }
   return row;
+}
+
+async function checkStorageQuota(db: AppDb, projectId: string, limits: DocumentLimits, size: number, now: Date) {
+  if (limits.maxUploadsPerDay === undefined && limits.maxTotalBytes === undefined) return;
+  const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  const [usage] = await db
+    .select({
+      total: sql<number>`coalesce(sum(${t.documents.sizeBytes}), 0)`,
+      recent: sql<number>`coalesce(sum(case when ${t.documents.uploadedAt} >= ${since} then 1 else 0 end), 0)`,
+    })
+    .from(t.documents)
+    .where(eq(t.documents.projectId, projectId));
+  if (limits.maxUploadsPerDay !== undefined && Number(usage?.recent ?? 0) >= limits.maxUploadsPerDay) {
+    throw new DomainError("conflict", `Se alcanzó el límite de ${limits.maxUploadsPerDay} documentos por día. Intenta de nuevo mañana.`);
+  }
+  if (limits.maxTotalBytes !== undefined && Number(usage?.total ?? 0) + size > limits.maxTotalBytes) {
+    throw new DomainError("conflict", "Se alcanzó el espacio máximo para documentos del proyecto. No se guardó el archivo.");
+  }
 }
 
 export async function getDocument(db: AppDb, projectId: string, id: string) {
