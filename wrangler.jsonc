@@ -3,8 +3,9 @@
   "name": "casa-cordoba",
   "main": "server/worker.ts",
   "compatibility_date": "2026-09-01",
-  "workers_dev": true,
+  "workers_dev": false,
   "preview_urls": false,
+  "routes": [{ "pattern": "obra.la-calandria.ar", "custom_domain": true }],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

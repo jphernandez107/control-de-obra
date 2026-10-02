@@ -51,7 +51,7 @@ Try in the assistant: «Marcelo pidió 20 barras del 12 y 30 del 10 a Hierros C�
 
 ## Production (Cloudflare)
 
-One Worker serves the built React app (Static Assets) and the API from one origin: `https://casa-cordoba.<subdomain>.workers.dev/` and `/api/...`. Every request (including `index.html`) goes through the Worker first (`run_worker_first`) so nothing is served without logging in.
+One Worker serves the built React app (Static Assets) and the API from one origin: `https://obra.la-calandria.ar/` and `/api/...`. The hostname is a Worker Custom Domain on the owner's existing `la-calandria.ar` zone (Cloudflare Free plan, also used for Home Assistant). The Custom Domain owns only the `obra` DNS record, and its certificate is the zone's free edge certificate. The `workers.dev` address and preview URLs are disabled. Every request (including `index.html`) goes through the Worker first (`run_worker_first`) so nothing is served without logging in.
 
 | Piece | Local | Production |
 | --- | --- | --- |
@@ -124,6 +124,7 @@ Verified against the official Cloudflare documentation on **2026-10-02**. The ac
 | Static Assets | Unlimited, free. Here every asset request also runs the Worker (login gate), so it counts toward the 100k/day | — | No |
 | D1 (Free) | 5M rows read/day, 100k rows written/day, 500 MB per DB, 5 GB per account, 50 queries per request, Time Travel 7 days | Queries fail until 00:00 UTC | **No.** Hard limit |
 | Workers Logs | 200,000 events/day, 3-day retention | Sampled at 1% | No |
+| Custom Domain + certificate | Free on any plan for a zone already on Cloudflare (first-level subdomain, covered by the free Universal SSL certificate) | — | No |
 | **R2** (Standard) | 10 GB-month storage, 1M Class A (writes/lists), 10M Class B (reads) per month, egress free | **Billed automatically** ($0.015/GB-month, $4.50/M Class A, $0.36/M Class B) | **Yes.** R2 needs a payment method and has **no hard spending cap** |
 
 **R2 is the only usage-billed product in this deployment.** Safeguards:
