@@ -68,18 +68,18 @@ message / document
 
 ## Identity
 
-`server/http/auth.ts` resolves an `Actor` per request. `AUTH_MODE=dev` uses a fixed development user; `AUTH_MODE=cloudflare-access` maps the verified `Cf-Access-Authenticated-User-Email` header to a `users` row with `can_login`. No passwords are stored.
+`server/http/auth.ts` resolves an `Actor` per request. `AUTH_MODE=dev` uses a fixed development user; `AUTH_MODE=cloudflare-access` maps the `Cf-Access-Authenticated-User-Email` header to a `users` row with `can_login`; `basic` (production) checks HTTP Basic credentials against password hashes held in a Worker secret. No passwords are stored in the database.
 
-## Cloudflare path (not deployed)
+## Cloudflare deployment
 
-Nothing here was deployed or provisioned. To move to Workers:
+Deployed as one Worker (`server/worker.ts`, config in `wrangler.jsonc`); see the README for commands, access model and free-tier limits.
 
-1. **D1**: apply `drizzle/*.sql` with `wrangler d1 migrations apply`; build the handle with `drizzle(env.DB, { schema })` from `drizzle-orm/d1` — it satisfies `AppDb` (async + `batch()`). FKs are always enforced on D1.
-2. **R2**: implement `DocumentStorage` with `env.BUCKET.put/get/delete` (≈15 lines) instead of `LocalFileStorage`.
-3. **Worker entry**: `export default { fetch: createApp({ db, storage, ai, projectId, auth }).fetch }` — `createApp` has no Node dependencies. `server/node.ts`, `server/db/node.ts`, `server/storage/local.ts`, `server/seed.ts` and `server/config.ts` are the only Node-specific files.
-4. **AI**: keep `AnthropicAIProvider` (fetch-based) with a Worker secret, or add a `WorkersAIProvider` implementing the same interface; no domain changes are needed.
-5. **Auth**: put the app behind Cloudflare Access and set `AUTH_MODE=cloudflare-access` (validate the Access JWT at the edge).
-6. Serve the Vite build as static assets; the UI calls relative `/api` URLs.
+- **D1**: `drizzle(env.DB, { schema })` from `drizzle-orm/d1` satisfies `AppDb`. Migrations are the same `drizzle/*.sql` files, applied with `wrangler d1 migrations apply` (tracked in `d1_migrations`; locally the libsql migrator tracks them in `__drizzle_migrations`). FKs are always enforced on D1.
+- **R2**: `R2Storage` (`server/storage/r2.ts`) implements `DocumentStorage`; without a `DOCUMENTS` binding, `UnavailableStorage` makes uploads fail with a Spanish message. Production passes `documentLimits` (size, uploads per day, total bytes) to `storeDocument`.
+- **Static assets**: the Vite build in `dist/`, SPA fallback via `not_found_handling: "single-page-application"`, `run_worker_first: true` so the login gate covers every path.
+- **Identity**: `AUTH_MODE` `basic` — `basicAuthEmail` checks the `Authorization` header against SHA-256 hashes in the `APP_USERS` secret; the e-mail must match a `users` row with `can_login`. The Worker accepts only this mode (a bare Access e-mail header would be spoofable without JWT validation).
+- **AI**: `AI_PROVIDER=disabled` → `DisabledAIProvider`, which throws `AINotConfiguredError`; the assistant shows «La función de IA todavía no está configurada. No se guardó nada.» The provider abstraction is unchanged; a later deployment sets `AI_PROVIDER=anthropic` plus an `ANTHROPIC_API_KEY` secret.
+- **Bootstrap**: `server/bootstrap.ts` writes idempotent SQL for the project, login users and units only.
 
 ## Known limitations
 
