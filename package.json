@@ -23,7 +23,6 @@
     "cf:logs": "wrangler tail casa-cordoba"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.131.0",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
     "@hono/node-server": "^2.1.3",

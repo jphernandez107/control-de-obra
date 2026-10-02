@@ -68,6 +68,7 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
       badge
       actions={
         <CardActions
+          validation={i.validation}
           confirmLabel={i.existingPaymentId ? "Confirmar imputación" : "Confirmar pago"}
           onConfirm={() => {
             setEditingAll(false);

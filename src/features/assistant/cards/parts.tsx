@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Check, CircleAlert, Info, Pencil, X } from "lucide-react";
+import type { InterpretationValidation } from "@/domain/assistant";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Pill";
 import { cn } from "@/components/ui/cn";
@@ -45,6 +46,7 @@ export function CardActions({
   onCancel,
   confirming,
   editing,
+  validation,
 }: {
   confirmLabel: string;
   onConfirm: () => void;
@@ -52,29 +54,40 @@ export function CardActions({
   onCancel: () => void;
   confirming?: boolean;
   editing?: boolean;
+  /** Server validation: blocking problems are listed and disable confirmation until fixed. */
+  validation?: InterpretationValidation;
 }) {
+  const errors = validation?.issues.filter((x) => x.severity === "error") ?? [];
   return (
-    <div className="flex items-center gap-2 border-t border-border px-4 pt-3 pb-4 lg:px-5 lg:pt-3.5 lg:pb-[18px]">
-      <Button icon={Check} onClick={onConfirm} loading={confirming} className="h-12 flex-1 lg:h-11 lg:flex-none">
-        {confirmLabel}
-      </Button>
-      <Button variant="secondary" icon={editing ? Check : Pencil} onClick={onEdit} disabled={confirming} className="h-12 lg:h-11">
-        {editing ? "Listo" : "Editar"}
-      </Button>
-      <span className="hidden flex-1 lg:block" />
-      <Button variant="ghost" icon={X} onClick={onCancel} disabled={confirming} className="hidden lg:inline-flex">
-        Cancelar
-      </Button>
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={confirming}
-        aria-label="Cancelar"
-        className="flex size-12 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface text-fg-2 lg:hidden"
-      >
-        <X size={18} />
-      </button>
-    </div>
+    <>
+      {errors.length ? (
+        <div className="flex items-start gap-2 border-t border-border bg-danger-soft px-4 py-2.5 lg:px-5" role="alert">
+          <CircleAlert size={15} className="mt-0.5 shrink-0 text-danger" />
+          <p className="text-[13px] leading-[18px] text-danger">Falta resolver antes de confirmar: {errors.map((x) => x.message).join(" ")}</p>
+        </div>
+      ) : null}
+      <div className="flex items-center gap-2 border-t border-border px-4 pt-3 pb-4 lg:px-5 lg:pt-3.5 lg:pb-[18px]">
+        <Button icon={Check} onClick={onConfirm} loading={confirming} disabled={errors.length > 0} className="h-12 flex-1 lg:h-11 lg:flex-none">
+          {confirmLabel}
+        </Button>
+        <Button variant="secondary" icon={editing ? Check : Pencil} onClick={onEdit} disabled={confirming} className="h-12 lg:h-11">
+          {editing ? "Listo" : "Editar"}
+        </Button>
+        <span className="hidden flex-1 lg:block" />
+        <Button variant="ghost" icon={X} onClick={onCancel} disabled={confirming} className="hidden lg:inline-flex">
+          Cancelar
+        </Button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={confirming}
+          aria-label="Cancelar"
+          className="flex size-12 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface text-fg-2 lg:hidden"
+        >
+          <X size={18} />
+        </button>
+      </div>
+    </>
   );
 }
 

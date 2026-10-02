@@ -59,7 +59,7 @@ export function OrderCard({ interpretation: i, confirming, onChange, onConfirm, 
       title="Detecté un pedido"
       subtitle="Revisa antes de guardar"
       badge
-      actions={<CardActions confirmLabel="Confirmar pedido" onConfirm={onConfirm} onEdit={() => setEditIndex(0)} onCancel={onCancel} confirming={confirming} />}
+      actions={<CardActions validation={i.validation} confirmLabel="Confirmar pedido" onConfirm={onConfirm} onEdit={() => setEditIndex(0)} onCancel={onCancel} confirming={confirming} />}
     >
       <div className="flex flex-col gap-2 px-4 pt-3 pb-3.5 lg:gap-4 lg:p-5">
         {desktop ? (

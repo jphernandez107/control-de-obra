@@ -16,8 +16,7 @@ export type DomainErrorCode =
   | "duplicate"
   | "conflict"
   | "unsupported_document"
-  | "ai_unavailable"
-  | "ai_malformed"
+  | "stale_proposal"
   | "persistence";
 
 const STATUS: Partial<Record<DomainErrorCode, number>> = {
@@ -25,8 +24,7 @@ const STATUS: Partial<Record<DomainErrorCode, number>> = {
   duplicate: 409,
   conflict: 409,
   unsupported_document: 415,
-  ai_unavailable: 503,
-  ai_malformed: 502,
+  stale_proposal: 409,
   persistence: 500,
 };
 

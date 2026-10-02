@@ -1,24 +1,18 @@
-import { AIUnavailableError, type AIProvider } from "./provider";
+import { AIError } from "./errors";
+import type { AIProvider } from "./provider";
 
-export const AI_NOT_CONFIGURED_MESSAGE = "La función de IA todavía no está configurada.";
-
-export class AINotConfiguredError extends AIUnavailableError {
-  constructor() {
-    super(AI_NOT_CONFIGURED_MESSAGE);
-    this.name = "AINotConfiguredError";
-  }
-}
-
-/** Deployments without an AI provider: every call fails with a clear Spanish message, nothing is sent anywhere. */
+/** Deployments without an AI provider: every call fails with AI_NOT_CONFIGURED, nothing is sent anywhere. */
 export class DisabledAIProvider implements AIProvider {
+  readonly id = "disabled" as const;
   readonly name = "deshabilitada";
+  readonly configured = false;
   async interpret(): Promise<never> {
-    throw new AINotConfiguredError();
+    throw new AIError("AI_NOT_CONFIGURED");
   }
   async analyzeDocument(): Promise<never> {
-    throw new AINotConfiguredError();
+    throw new AIError("AI_NOT_CONFIGURED");
   }
   async answer(): Promise<never> {
-    throw new AINotConfiguredError();
+    throw new AIError("AI_NOT_CONFIGURED");
   }
 }

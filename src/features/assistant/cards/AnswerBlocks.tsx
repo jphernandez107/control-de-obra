@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Boxes, Camera, Check, ChevronRight, Circle, CircleAlert, CircleCheck, ClipboardList, GitFork, Keyboard, Loader, LoaderCircle, RotateCw, ScanEye, Store, Truck, Upload } from "lucide-react";
+import { ArrowRight, Boxes, Camera, CloudOff, Check, ChevronRight, Circle, CircleAlert, CircleCheck, ClipboardList, GitFork, Keyboard, Loader, LoaderCircle, RotateCw, ScanEye, Store, Truck, Upload } from "lucide-react";
 import type { AnalysisStep, BalanceRow, ChoiceOption, QuantityRow, SuggestedAction } from "@/domain/assistant";
 import { formatMoney, formatNumber } from "@/domain/format";
 import { Button } from "@/components/ui/Button";
@@ -265,6 +265,31 @@ export function ActionChips({ actions, onPrompt }: { actions: SuggestedAction[];
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/** AI provider/document failure: what happened and what can be done instead. Nothing was saved. */
+export function AiErrorCard({ message, hint }: { message: string; hint?: string }) {
+  return (
+    <div className="flex w-full flex-col gap-2 rounded-[14px] border border-border-strong bg-surface p-4" role="status">
+      <div className="flex items-center gap-2.5">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-[9px] bg-warning-soft text-warning">
+          <CloudOff size={17} />
+        </span>
+        <p className="text-[15px] leading-[22px] font-medium text-fg">{message}</p>
+      </div>
+      {hint ? <p className="text-sm leading-[21px] text-fg-2">{hint}</p> : null}
+    </div>
+  );
+}
+
+/** Shown near the composer when the deployment has no AI provider configured. */
+export function AiStatusNotice() {
+  return (
+    <div className="flex items-start gap-2.5 rounded-[10px] bg-warning-soft px-3.5 py-3" role="status">
+      <CircleAlert size={16} className="mt-0.5 shrink-0 text-warning" />
+      <p className="text-[13px] leading-[19px] text-warning">La función de IA todavía no está configurada. Puedes registrar pedidos, entregas y pagos desde Pedidos y Proveedores.</p>
     </div>
   );
 }

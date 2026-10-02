@@ -1,7 +1,7 @@
 import type { D1Database, ExecutionContext, Fetcher, R2Bucket } from "@cloudflare/workers-types";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { createProvider, parseProviderSetting } from "./ai/factory";
+import { getAIProvider, getDocumentContentExtractor, parseAIProviderId, type AIConfig } from "./ai/factory";
 import type { AppDb } from "./db/client";
 import * as schema from "./db/schema";
 import { basicAuthEmail, BASIC_REALM, parseBasicUsers, type AuthConfig } from "./http/auth";
@@ -18,10 +18,11 @@ export interface Env {
   DOCUMENTS?: R2Bucket;
   /** Secret: `{"email": "sha256 hex of the password", …}`. */
   APP_USERS?: string;
+  /** mock | cloudflare | disabled (default). */
   AI_PROVIDER?: string;
-  ANTHROPIC_API_KEY?: string;
   AI_MODEL?: string;
-  AI_EFFORT?: string;
+  /** Workers AI binding. Not configured yet: the Cloudflare integration adds it in wrangler.jsonc (see docs/AI_HANDOFF.md). */
+  AI?: unknown;
   PROJECT_ID?: string;
   MAX_UPLOAD_MB?: string;
   MAX_UPLOADS_PER_DAY?: string;
@@ -68,16 +69,13 @@ async function buildApp(env: Env): Promise<App | null> {
     : await db.select().from(schema.projects).limit(1);
   if (!project) return null;
   const auth: AuthConfig = authConfig(env);
-  const ai = createProvider({
-    aiProvider: parseProviderSetting(env.AI_PROVIDER, "disabled"),
-    anthropicApiKey: env.ANTHROPIC_API_KEY || undefined,
-    aiModel: env.AI_MODEL || "claude-opus-5-5",
-    aiEffort: (["low", "medium", "high", "xhigh", "max"].includes(env.AI_EFFORT ?? "") ? env.AI_EFFORT : "low") as "low",
-  });
+  const aiConfig: AIConfig = { provider: parseAIProviderId(env.AI_PROVIDER, "disabled"), model: env.AI_MODEL || undefined, cloudflareBinding: env.AI };
+  const ai = getAIProvider(aiConfig);
   const app = createApp({
     db,
     storage: env.DOCUMENTS ? new R2Storage(env.DOCUMENTS) : new UnavailableStorage(),
     ai,
+    documentExtractor: (bytes) => getDocumentContentExtractor(aiConfig, bytes),
     projectId: project.id,
     auth,
     documentLimits: {

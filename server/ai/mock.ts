@@ -1,12 +1,14 @@
+import { formatMoney } from "../../src/domain/format";
 import { addDays } from "../domain/time";
 import { normalizeText } from "../domain/text";
-import type { AIInput, AIProvider, AIQuestionContext, DocumentInput } from "./provider";
-import { emptyExtraction, type AIAnswer, type Extraction } from "./schemas";
+import type { AIConversationContext, AIDocumentInput, AIInterpretationInput, AIProvider, AIQuestionInput } from "./provider";
+import type { AIAnswerResult, AIInterpretation, AIInterpretationResult, DocumentType, ItemMention, ProjectQuestion } from "./schemas";
 
-// Deterministic stand-in for a language model. It recognizes common Spanish
-// phrasings from the construction site with rules, so the whole review →
-// confirm flow works offline and in tests. It returns exactly the same
-// schema as a real provider and is subject to the same validation.
+// Deterministic stand-in for a language model (AI_PROVIDER=mock). It
+// recognizes common Spanish phrasings from the construction site with rules,
+// so the whole interpret → review → confirm flow works offline and in tests.
+// It returns exactly the same contract as a real provider and goes through
+// the same validation. It has no general intelligence on purpose.
 
 const UNIT_WORDS =
   "barras?|bolsas?|m3|m³|metros? cubicos?|m2|m²|kg|kilos?|mallas?|unidades|u|litros?|metros?|mts?|canos?|codos?|ladrillos?";
@@ -54,7 +56,7 @@ function remitoNumber(text: string): string | null {
   return m ? m[1]! : null;
 }
 
-function paymentMethod(text: string): Extraction["paymentMethod"] {
+function paymentMethod(text: string): "transferencia" | "efectivo" | "cheque" | null {
   const t = normalizeText(text);
   if (/transfer/.test(t)) return "transferencia";
   if (/efectivo|cash/.test(t)) return "efectivo";
@@ -81,7 +83,7 @@ function supplierMention(text: string, suppliers: string[]): string | null {
 }
 
 /** "20 barras del 12 y 30 del 10" → items; a missing unit/material inherits the previous segment's. */
-function parseItems(text: string, supplier: string | null): Extraction["items"] {
+function parseItems(text: string, supplier: string | null): ItemMention[] {
   let body = text;
   if (supplier) body = body.replace(new RegExp(`\\b(?:a|al|de|del|con)\\s+${supplier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i"), " ");
   body = body
@@ -90,7 +92,7 @@ function parseItems(text: string, supplier: string | null): Extraction["items"] 
     .replace(/\$\s*[\d.,]+/g, " ")
     .replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, " ");
   const segments = body.split(/\s*(?:,|;|\n|\by\b|\be\b|\+)\s*/i);
-  const items: Extraction["items"] = [];
+  const items: ItemMention[] = [];
   let lastUnit: string | null = null;
   let lastHead = "";
   const re = new RegExp(`(\\d+(?:[.,]\\d+)?)\\s*(${UNIT_WORDS})?\\b\\.?\\s*(.*)$`, "i");
@@ -124,152 +126,231 @@ function parseItems(text: string, supplier: string | null): Extraction["items"] 
   return items;
 }
 
-function queryOf(text: string, suppliers: string[]): Extraction["query"] {
+type Question = Omit<ProjectQuestion, "intent" | "confidence" | "note">;
+
+function question(text: string, suppliers: string[]): Question {
   const t = normalizeText(text);
   const supplier = supplierMention(text, suppliers);
   const ref = orderReference(text);
-  if (/sin imputar/.test(t)) return { type: "unallocated_payments", supplier, material: null, orderReference: null };
-  if (/pendientes? de entrega|falta(n)? (entregar|llegar)|sin entregar|que falta|no llego|no llegaron/.test(t)) return { type: "pending_deliveries", supplier, material: null, orderReference: ref };
-  if (/pasando del computo|computo|previsto|nos pasamos/.test(t)) return { type: "computation_status", supplier: null, material: null, orderReference: null };
-  if (/debemos|debo|saldo|deuda|adeud/.test(t)) return { type: supplier ? "supplier_balance" : "total_balance", supplier, material: null, orderReference: null };
+  const q = (query: Question["query"], extra: Partial<Question> = {}): Question => ({
+    query,
+    supplier: null,
+    orderReference: null,
+    material: null,
+    aspect: null,
+    refersToPrevious: false,
+    ...extra,
+  });
+  // A follow-up that names nothing ("¿y cuánto falta pagar?") refers to the previous exchange.
+  const followUp = !ref && !supplier && /^(y|e)\b|^(y )?(cuanto|como|que)\b.*\b(falta|viene|va|esta|queda)\b/.test(t);
+  if (/sin imputar/.test(t)) return q("list_unallocated_payments", { supplier });
+  if (/entregad[oa]s? (y|pero)? ?(no|sin) pag|entregad[oa]s? sin pagar|llegaron y no (pagamos|se pagaron)/.test(t)) return q("list_delivered_unpaid_orders", { supplier });
+  if (/falta(n)? pagar|saldo del pedido|debemos del pedido|queda por pagar/.test(t) && (ref || !supplier)) return q("get_order_summary", { orderReference: ref, aspect: "payment", refersToPrevious: !ref });
+  if (/pendientes? de entrega|falta(n)? (entregar|llegar)|sin entregar|que falta|no llego|no llegaron|entregas pendientes/.test(t)) {
+    if (ref || followUp) return q("get_order_summary", { orderReference: ref, aspect: "delivery", refersToPrevious: !ref });
+    return q("list_orders_pending_delivery", { supplier });
+  }
+  if (/pasando del computo|computo|previsto|nos pasamos/.test(t)) return q("get_computation_variance");
+  if (/debemos|debo|saldo|deuda|adeud|cuenta corriente/.test(t)) return supplier ? q("get_supplier_summary", { supplier }) : q("list_supplier_balances");
   const qty = /cuant[oa]s?\s+(.+?)\s+(?:llevamos|hemos|tenemos|pedimos|se pidi|van|fueron|nos)/.exec(t);
-  if (qty) return { type: "material_quantity", supplier: null, material: qty[1]!.replace(/^(de|del)\s+/, ""), orderReference: null };
-  if (ref && /como (esta|va)|estado|que paso/.test(t)) return { type: "order_status", supplier: null, material: null, orderReference: ref };
-  return { type: "general", supplier, material: null, orderReference: ref };
+  if (qty) return q("get_material_summary", { material: qty[1]!.replace(/^(de|del)\s+/, "") });
+  if (/como (esta|va|viene)|estado|que paso/.test(t) && (ref || followUp)) return q("get_order_summary", { orderReference: ref, aspect: "overall", refersToPrevious: !ref });
+  return q("general", { supplier, orderReference: ref });
 }
 
-export function extractFromText(text: string, today: string, suppliers: string[]): Extraction {
+function result(interpretation: AIInterpretation, document: { type: DocumentType; confidence: number } | null = null): AIInterpretationResult {
+  return { interpretation, document, meta: { provider: "mock", model: "reglas-locales" } };
+}
+
+/** Rules for a plain message. Exported for tests. */
+export function interpretText(text: string, today: string, suppliers: string[], conversation?: AIConversationContext): AIInterpretation {
   const t = normalizeText(text);
-  const out = emptyExtraction();
-  out.supplier = supplierMention(text, suppliers);
-  out.orderReference = orderReference(text);
-  out.date = parseDate(text, today);
-  out.remito = remitoNumber(text);
-  out.paymentMethod = paymentMethod(text);
-  const isQuestion = /[¿?]/.test(text) || /^(cuanto|cuantos|cuanta|que|cual|como|nos estamos|hay|tenemos)\b/.test(t);
+  const supplier = supplierMention(text, suppliers);
+  const ref = orderReference(text);
+  const date = parseDate(text, today);
+  const method = paymentMethod(text);
+  const isQuestion = /[¿?]/.test(text) || /^(y |e )?(cuanto|cuantos|cuanta|que|cual|como|nos estamos|hay|tenemos)\b/.test(t);
+  const base = { confidence: 0.85, note: null };
 
   if (/\bimputa(r|mos|le)?\b/.test(t) && !isQuestion) {
-    out.intent = "allocate_payment";
-    out.confidence = 0.8;
-    out.amount = parseAmountText(text);
-    return out;
+    return { intent: "allocate_payment", ...base, supplier, orderReference: ref, amount: parseAmountText(text) };
   }
   if (isQuestion) {
-    out.intent = "ask_query";
-    out.query = queryOf(text, suppliers);
-    out.confidence = out.query?.type === "general" ? 0.4 : 0.9;
-    return out;
+    const q = question(text, suppliers);
+    return { intent: "ask_project_question", ...base, confidence: q.query === "general" ? 0.4 : 0.9, ...q };
   }
-  if (/\bpag(amos|ue|o|aron|ado|ar)\b|transferi|abonamos|deposit/.test(t)) {
-    out.amount = parseAmountText(text);
-    out.toCurrentAccount = /cuenta corriente|a cuenta|sin imputar/.test(t);
-    out.paysFullOrderBalance = Boolean(out.orderReference) && /complet|total|todo|saldo|lo que (falta|debemos)/.test(t);
+  if (/\bpag(amos|ue|o|aron|ado|ar|alo|ala)\b|transferi|abonamos|deposit/.test(t)) {
+    const amount = parseAmountText(text);
+    const full = /complet|todo el pedido|el saldo del pedido|lo que (falta|debemos)|\btotal\b|\btodo\b/.test(t) && (Boolean(ref) || amount === null);
+    if (full) return { intent: "pay_order_balance", ...base, orderReference: ref, supplier, date, paymentMethod: method, paymentReference: null };
     const parts = [...text.matchAll(/(\$?\s*[\d.,]+\s*(?:mil|millones?)?)\s+(?:al|para el)\s+pedido\s*#?\s*([a-z]{0,3}-?\d+)/gi)];
-    if (parts.length) out.allocations = parts.map((p) => ({ orderReference: p[2]!.toUpperCase(), amount: parseAmountText(p[1]!) }));
-    out.intent = out.paysFullOrderBalance ? "pay_order_balance" : out.toCurrentAccount ? "record_supplier_account_payment" : "create_payment";
-    out.confidence = out.amount !== null || out.paysFullOrderBalance ? 0.9 : 0.6;
-    return out;
+    if (amount === null && !parts.length) {
+      return {
+        intent: "clarification_required",
+        ...base,
+        confidence: 0.6,
+        question: supplier ? `¿De cuánto fue el pago a ${supplier}?` : "¿De cuánto fue el pago y a qué proveedor?",
+        possibleIntent: "create_supplier_payment",
+        missing: supplier ? ["amount"] : ["amount", "supplier"],
+      };
+    }
+    return {
+      intent: "create_supplier_payment",
+      ...base,
+      supplier,
+      amount,
+      currency: /dolar|usd|u\$s/.test(t) ? "USD" : "ARS",
+      date,
+      paymentMethod: method,
+      paymentReference: null,
+      toCurrentAccount: /cuenta corriente|a cuenta|sin imputar/.test(t),
+      orderReference: parts.length ? null : ref,
+      allocations: parts.map((p) => ({ orderReference: p[2]!.toUpperCase(), amount: parseAmountText(p[1]!) })),
+    };
   }
   if (/llegaron|llego|se entrego|entregaron|entrego|recibimos|descargaron|trajeron|vino|vinieron/.test(t)) {
-    out.deliverAllPending = /todo lo pendiente|lo pendiente|todo el pedido|lo que faltaba|el resto|lo que quedaba|todo lo que falta|completo/.test(t);
-    out.items = out.deliverAllPending ? [] : parseItems(text, out.supplier);
-    out.intent = out.deliverAllPending ? "complete_order_delivery" : "register_delivery";
-    out.confidence = 0.85;
-    return out;
+    const all = /todo lo pendiente|lo pendiente|todo el pedido|lo que faltaba|el resto|lo que quedaba|todo lo que falta|completo/.test(t);
+    const items = all ? [] : parseItems(text, supplier);
+    if (all || !items.length) return { intent: "complete_order_delivery", ...base, orderReference: ref, supplier, deliveryReference: remitoNumber(text), date };
+    return {
+      intent: "register_delivery",
+      ...base,
+      orderReference: ref,
+      supplier,
+      deliveryReference: remitoNumber(text),
+      date,
+      items: items.flatMap((i) => (i.quantity === null ? [] : [{ material: i.material, quantity: i.quantity, unit: i.unit }])),
+    };
   }
   if (/pidio|pedimos|encargo|encargamos|compramos|compro|pidieron|\bpedi\b|hicimos un pedido|pedido de/.test(t)) {
     const who = /^(\w+)\s+(?:pidio|encargo|compro)/.exec(t);
-    out.orderedBy = who ? who[1]!.charAt(0).toUpperCase() + who[1]!.slice(1) : null;
-    out.items = parseItems(text.replace(/^\s*\w+\s+(pidi[oó]|encarg[oó]|compr[oó])\s+/i, ""), out.supplier);
-    out.purchaseMode = /contado|efectivo/.test(t) ? "contado" : null;
-    const total = /total\s*(?:de)?\s*\$?\s*[\d.,]+/.exec(t) ? parseAmountText(text.slice(t.indexOf("total"))) : null;
-    out.orderTotal = total;
-    out.intent = "create_order";
-    out.confidence = out.items.length ? 0.85 : 0.5;
-    return out;
-  }
-  out.intent = "unknown";
-  out.confidence = 0.2;
-  return out;
-}
-
-// ------------------------------------------------------------------ documents
-
-/** Text from simple, uncompressed PDFs (`(text) Tj`). Real scans need a real model. */
-export function extractPdfText(data: Uint8Array): string {
-  const raw = new TextDecoder("latin1").decode(data);
-  const lines: string[] = [];
-  for (const block of raw.matchAll(/BT([\s\S]*?)ET/g)) {
-    const parts = [...block[1]!.matchAll(/\((.*?)(?<!\\)\)\s*Tj/g)].map((m) => m[1]!.replace(/\\([()\\])/g, "$1"));
-    if (parts.length) lines.push(parts.join(""));
-  }
-  return lines.join("\n");
-}
-
-function documentTypeOf(text: string): Extraction["documentType"] {
-  const t = normalizeText(text);
-  if (/borros|ilegible|blur/.test(t)) return "unreadable";
-  if (/remito|nota de entrega|entregado|comprobante de entrega/.test(t)) return "delivery_proof";
-  if (/transferencia|comprobante de pago|recibo|pago|pagamos|operacion/.test(t)) return "payment_proof";
-  if (/pedido|presupuesto|orden de compra|nota de venta|cotizacion/.test(t)) return "order_proof";
-  return "other";
-}
-
-export class MockAIProvider implements AIProvider {
-  readonly name = "mock";
-  readonly model = "reglas-locales";
-
-  async interpret(input: AIInput): Promise<Extraction> {
-    return extractFromText(input.text, input.context.today, input.context.suppliers);
-  }
-
-  async analyzeDocument(input: DocumentInput): Promise<Extraction> {
-    const body = input.mimeType === "application/pdf" ? extractPdfText(input.data) : "";
-    const combined = [input.fileName.replace(/[_-]+/g, " "), input.text ?? "", body].join("\n");
-    const documentType = documentTypeOf(`${input.fileName} ${body} ${input.text ?? ""}`);
-    if (documentType === "unreadable" || (!body && documentType === "other" && !input.text)) {
-      const out = emptyExtraction();
-      out.documentType = "unreadable";
-      out.note = "No se distinguen importes ni cantidades.";
-      return out;
+    const items = parseItems(text.replace(/^\s*\w+\s+(pidi[oó]|encarg[oó]|compr[oó])\s+/i, ""), supplier);
+    if (!items.length) {
+      return { intent: "clarification_required", ...base, confidence: 0.5, question: "Entendí que se hizo un pedido. ¿Qué materiales y cantidades se pidieron, y a qué proveedor?", possibleIntent: "create_order", missing: ["items"] };
     }
-    const lines = body ? body.split("\n") : [];
-    const itemText = lines.filter((l) => /^\s*\d/.test(l)).join("\n");
-    const base = extractFromText(`${input.text ?? ""}\n${body}`, input.context.today, input.context.suppliers);
-    const out: Extraction = { ...base, documentType, confidence: body ? 0.8 : 0.5 };
-    out.supplier = supplierMention(combined, input.context.suppliers);
-    out.orderReference = orderReference(combined);
-    out.remito = remitoNumber(combined);
-    const fecha = /fecha:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i.exec(body);
-    out.date = fecha ? parseDate(fecha[1]!, input.context.today) : base.date;
-    out.items = itemText ? parseItems(itemText, out.supplier).map((it) => ({ ...it, unitPrice: priceFor(lines, it.material) })) : base.items;
-    if (documentType === "delivery_proof") {
-      out.intent = out.items.length ? "register_delivery" : "complete_order_delivery";
-      out.deliverAllPending = !out.items.length;
-    } else if (documentType === "payment_proof") {
-      out.amount = parseAmountText(body || combined);
-      out.paymentMethod = paymentMethod(combined) ?? "transferencia";
-      out.items = [];
-      // A receipt is a current-account payment only when it says so ("a cuenta").
-      out.intent = !out.orderReference && out.toCurrentAccount ? "record_supplier_account_payment" : "create_payment";
-    } else if (documentType === "order_proof") {
-      out.intent = "create_order";
-      const total = /total[^\d$]*\$?\s*([\d.]+(?:,\d{1,2})?)/i.exec(body);
-      out.orderTotal = total && !out.items.some((i) => i.unitPrice !== null) ? cleanNumber(total[1]!) : null;
-    } else out.intent = "unknown";
-    return out;
-  }
-
-  async answer(input: AIQuestionContext): Promise<AIAnswer> {
-    void input;
+    const total = /total\s*(?:de)?\s*\$?\s*[\d.,]+/.exec(t) ? parseAmountText(text.slice(t.indexOf("total"))) : null;
     return {
-      text: "Puedo registrar pedidos, entregas y pagos, o responder sobre saldos, entregas pendientes y el cómputo. Prueba con «¿Cuánto debemos a Hierros Córdoba?» o «Llegaron las 20 barras del 12».",
+      intent: "create_order",
+      ...base,
+      supplier,
+      orderReference: ref,
+      date,
+      requestedBy: who ? who[1]!.charAt(0).toUpperCase() + who[1]!.slice(1) : null,
+      purchaseMode: /contado|efectivo/.test(t) ? "contado" : null,
+      items,
+      orderTotal: total,
     };
   }
+  void conversation;
+  return { intent: "unknown", confidence: 0.2, note: null };
+}
+
+function documentTypeOf(text: string): { type: DocumentType; confidence: number } {
+  const t = normalizeText(text);
+  if (/borros|ilegible|cortad/.test(t)) return { type: "unknown", confidence: 0.2 };
+  if (/remito|nota de entrega|comprobante de entrega/.test(t)) return { type: "delivery", confidence: 0.85 };
+  if (/transferencia|comprobante de pago|recibo|pagamos|operacion/.test(t)) return { type: "payment", confidence: 0.85 };
+  if (/pedido|presupuesto|orden de compra|nota de venta|cotizacion/.test(t)) return { type: "order", confidence: 0.85 };
+  return { type: "unknown", confidence: 0.3 };
 }
 
 function priceFor(lines: string[], material: string): number | null {
   const line = lines.find((l) => normalizeText(l).includes(normalizeText(material).split(" ").slice(-1)[0]!));
   const m = line ? /\$\s*([\d.]+(?:,\d{1,2})?)/.exec(line) : null;
   return m ? cleanNumber(m[1]!) : null;
+}
+
+/** Rules for normalized document text. Unknown fields stay null. Exported for tests. */
+export function interpretDocument(fileName: string, body: string, userText: string | undefined, today: string, suppliers: string[]): AIInterpretationResult {
+  const combined = [fileName.replace(/[_-]+/g, " "), userText ?? "", body].join("\n");
+  const doc = documentTypeOf(`${fileName} ${body} ${userText ?? ""}`);
+  if (doc.type === "unknown") return result({ intent: "unknown", confidence: doc.confidence, note: null }, doc);
+  const lines = body.split("\n");
+  const supplier = supplierMention(combined, suppliers);
+  const ref = orderReference(combined);
+  const fecha = /fecha:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i.exec(body);
+  const date = fecha ? parseDate(fecha[1]!, today) : parseDate(`${userText ?? ""}`, today);
+  const itemText = lines.filter((l) => /^\s*\d/.test(l)).join("\n");
+  const items = itemText ? parseItems(itemText, supplier) : [];
+  const base = { confidence: doc.confidence, note: null };
+  if (doc.type === "delivery") {
+    if (!items.length) return result({ intent: "complete_order_delivery", ...base, orderReference: ref, supplier, deliveryReference: remitoNumber(combined), date }, doc);
+    return result(
+      {
+        intent: "register_delivery",
+        ...base,
+        orderReference: ref,
+        supplier,
+        deliveryReference: remitoNumber(combined),
+        date,
+        items: items.flatMap((i) => (i.quantity === null ? [] : [{ material: i.material, quantity: i.quantity, unit: i.unit }])),
+      },
+      doc,
+    );
+  }
+  if (doc.type === "payment") {
+    const t = normalizeText(combined);
+    return result(
+      {
+        intent: "create_supplier_payment",
+        ...base,
+        supplier,
+        amount: parseAmountText(body || combined),
+        currency: "ARS",
+        date,
+        paymentMethod: paymentMethod(combined) ?? "transferencia",
+        paymentReference: /operaci[oó]n:?\s*(\w+)/i.exec(body)?.[1] ?? null,
+        // A receipt is a current-account payment only when it says so ("a cuenta").
+        toCurrentAccount: !ref && /cuenta corriente|a cuenta/.test(t),
+        orderReference: ref,
+        allocations: [],
+      },
+      doc,
+    );
+  }
+  const priced = items.map((it) => ({ ...it, unitPrice: priceFor(lines, it.material) }));
+  const total = /total[^\d$]*\$?\s*([\d.]+(?:,\d{1,2})?)/i.exec(body);
+  return result(
+    {
+      intent: "create_order",
+      ...base,
+      supplier,
+      orderReference: ref,
+      date,
+      requestedBy: null,
+      purchaseMode: null,
+      items: priced,
+      orderTotal: total && !priced.some((i) => i.unitPrice !== null) ? cleanNumber(total[1]!) : null,
+    },
+    doc,
+  );
+}
+
+export class MockAIProvider implements AIProvider {
+  readonly id = "mock" as const;
+  readonly name = "mock";
+  readonly model = "reglas-locales";
+  readonly configured = true;
+
+  async interpret(input: AIInterpretationInput): Promise<AIInterpretationResult> {
+    return result(interpretText(input.text, input.project.today, input.project.suppliers, input.conversation));
+  }
+
+  async analyzeDocument(input: AIDocumentInput): Promise<AIInterpretationResult> {
+    return interpretDocument(input.document.fileName, input.content.text, input.userText, input.project.today, input.project.suppliers);
+  }
+
+  /** Free-form questions: a fixed summary built only from the query results it is given. */
+  async answer(input: AIQuestionInput): Promise<AIAnswerResult> {
+    const parts: string[] = [];
+    for (const r of input.results) {
+      if (r.status !== "ok") continue;
+      if (r.query === "list_supplier_balances") parts.push(`El saldo total con proveedores es de ${formatMoney(r.data.totalOutstandingMinor)}.`);
+      if (r.query === "list_orders_pending_delivery") parts.push(r.data.orders.length ? `Hay ${r.data.orders.length} ${r.data.orders.length === 1 ? "pedido pendiente" : "pedidos pendientes"} de entrega.` : "No hay entregas pendientes.");
+    }
+    return {
+      text: `${parts.join(" ")} Puedo registrar pedidos, entregas y pagos, o responder sobre saldos, entregas pendientes y el cómputo. Prueba con «¿Cuánto debemos a Hierros Córdoba?» o «Llegaron las 20 barras del 12».`.trim(),
+      meta: { provider: "mock", model: "reglas-locales" },
+    };
+  }
 }

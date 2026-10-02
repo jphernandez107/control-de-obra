@@ -2,6 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockAIProvider } from "../server/ai/mock";
+import type { DocumentBytesSource, DocumentContentExtractor } from "../server/ai/document-content";
 import type { AIProvider } from "../server/ai/provider";
 import { migrateDatabase, openDatabase } from "../server/db/node";
 import { createApp } from "../server/http/app";
@@ -14,13 +15,13 @@ import type { AssistantBlock, ChatMessage, ConfirmResponse, Interpretation } fro
 
 export const NOW = new Date("2026-10-02T13:00:00.000Z");
 
-export async function setup(options: { empty?: boolean; ai?: AIProvider } = {}) {
+export async function setup(options: { empty?: boolean; ai?: AIProvider; extractor?: (bytes: DocumentBytesSource) => DocumentContentExtractor } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "cdo-test-"));
   const { db, client } = await openDatabase(`file:${join(dir, "test.db")}`);
   await migrateDatabase(db);
   const storage = new MemoryStorage();
   const { projectId } = await seedDatabase(db, storage, { empty: options.empty, now: NOW });
-  const app = createApp({ db, storage, ai: options.ai ?? new MockAIProvider(), projectId, auth: { mode: "dev" }, now: () => NOW });
+  const app = createApp({ db, storage, ai: options.ai ?? new MockAIProvider(), documentExtractor: options.extractor, projectId, auth: { mode: "dev" }, now: () => NOW });
 
   async function call<T = unknown>(method: string, path: string, body?: unknown): Promise<{ status: number; json: T }> {
     const res = await app.request(`/api${path}`, {

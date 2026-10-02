@@ -11,6 +11,7 @@ import { useIsDesktop } from "@/hooks/useMediaQuery";
 import { useDashboard, useSession } from "@/queries";
 import { fileToAttachment, isSupportedAttachment, useAssistant } from "@/features/assistant/AssistantProvider";
 import { AttachSheet } from "@/features/assistant/AttachSheet";
+import { AiStatusNotice } from "@/features/assistant/cards/AnswerBlocks";
 import { DESKTOP_SUGGESTIONS, DesktopComposer, MOBILE_SUGGESTIONS, MobileComposer, SuggestionChips, type Suggestion } from "@/features/assistant/Composer";
 import { ContextPanel } from "@/features/assistant/ContextPanel";
 import { ConversationsDrawer } from "@/features/assistant/ConversationsDrawer";
@@ -40,6 +41,7 @@ export function AssistantPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const hasMessages = assistant.messages.length > 0;
+  const aiOff = session.data?.ai.configured === false;
   const today = assistant.today;
   const showSuggestions = assistant.pendingCount === 0 && !assistant.busy;
 
@@ -150,7 +152,11 @@ export function AssistantPage() {
                   {!assistant.busy ? <SuggestionChips items={DESKTOP_SUGGESTIONS} onPick={pickSuggestion} /> : null}
                   <DesktopComposer composer={composer} />
                 </div>
-                <p className="text-xs text-fg-3">Puedes arrastrar PDFs, fotos de remitos o capturas de transferencias.</p>
+                {aiOff ? (
+                  <div className="w-full max-w-[720px]">
+                    <AiStatusNotice />
+                  </div>
+                ) : <p className="text-xs text-fg-3">Puedes arrastrar PDFs, fotos de remitos o capturas de transferencias.</p>}
               </div>
             </>
           ) : (
@@ -164,7 +170,8 @@ export function AssistantPage() {
                   <p className="text-base leading-6 text-fg-2">
                     Registro pedidos, entregas y pagos a partir de mensajes, fotos de remitos o capturas de transferencias. Siempre te muestro lo que entendí antes de guardar.
                   </p>
-                  <div className="mt-[18px]">
+                  <div className="mt-[18px] flex flex-col gap-2.5">
+                    {aiOff ? <AiStatusNotice /> : null}
                     <DesktopComposer composer={composer} />
                   </div>
                 </div>
@@ -256,6 +263,7 @@ export function AssistantPage() {
                 </button>
               ))}
             </div>
+            {aiOff ? <AiStatusNotice /> : null}
             {dashboard.data && !dashboard.data.computation.loaded ? (
               <div className="flex items-start gap-2.5 rounded-[10px] bg-sunken px-3.5 py-3">
                 <Boxes size={16} className="mt-0.5 shrink-0 text-fg-3" />

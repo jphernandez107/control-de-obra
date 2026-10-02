@@ -389,6 +389,8 @@ export const chatMessages = sqliteTable(
     /** Rendered assistant blocks (JSON). Display history only — never the source of truth. */
     blocks: text("blocks"),
     authorUserId: text("author_user_id").references(() => users.id),
+    /** JSON { orderIds, supplierIds, materialIds }: what this reply was about, for follow-up questions. Ids only, never figures. */
+    contextRefs: text("context_refs"),
     createdAt: createdAt(),
   },
   (t) => [index("chat_messages_conversation_idx").on(t.conversationId, t.createdAt)],
@@ -401,8 +403,9 @@ export const messageAttachments = sqliteTable("message_attachments", {
 });
 
 /**
- * A structured write proposal produced from a message or document. Nothing
- * reaches the domain tables until a user confirms it.
+ * Pending AI action: a structured write proposal produced from a message or
+ * document. Nothing reaches the domain tables until a user confirms it.
+ * (Table name kept from the first schema; the code calls it PendingAIAction.)
  */
 export const aiInterpretations = sqliteTable(
   "ai_interpretations",
@@ -423,6 +426,12 @@ export const aiInterpretations = sqliteTable(
     /** Proposal as confirmed, after user edits. */
     confirmedProposal: text("confirmed_proposal"),
     status: text("status").notNull(), // pending | confirmed | cancelled | undone
+    /** Server validation of the current proposal: ready | needs_review | blocked. */
+    validationState: text("validation_state"),
+    /** JSON string[]: matching warnings shown to the user (Spanish). */
+    warnings: text("warnings"),
+    /** JSON string[]: fields that still need the user (supplier, material, order, amount…). */
+    unresolvedFields: text("unresolved_fields"),
     resultEntityType: text("result_entity_type"),
     resultEntityId: text("result_entity_id"),
     result: text("result"),

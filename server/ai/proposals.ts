@@ -4,26 +4,28 @@ import type {
   DeliveryInterpretation,
   InterpretedDeliveryItem,
   InterpretedOrderItem,
-  MatchOption,
   OrderInterpretation,
   PaymentInterpretation,
+  SuggestedAction,
 } from "../../src/domain/assistant";
 import type { StatusTag } from "../../src/domain/types";
 import { formatDate, formatMoney, formatNumber } from "../../src/domain/format";
 import type { Ledger } from "../domain/derive";
-import { findOrdersByReference, matchMaterial, matchSupplier, type MaterialCandidate, type SupplierCandidate } from "../domain/matching";
+import { matchMaterial } from "../domain/matching";
 import { parseMoneyToMinor } from "../domain/money";
 import { fromMilli, toMilli } from "../domain/quantity";
+import { orderFinancialSummary } from "../domain/summaries";
 import { normalizeText } from "../domain/text";
 import { isValidDate } from "../domain/time";
 import { unitCodeFromWord } from "../domain/units";
 import type { Order } from "../repositories/snapshot";
-import type { Extraction } from "./schemas";
+import { materialCandidates, rankOrderCandidates, resolveOrderReference, resolveSupplierMention, titleCase } from "./resolve";
+import type { AllocatePaymentIntent, CompleteOrderDeliveryIntent, CreateOrderIntent, CreateSupplierPaymentIntent, PayOrderBalanceIntent, RegisterDeliveryIntent } from "./schemas";
 
-// Turns a validated extraction into application-owned proposals. All
-// matching (supplier, material, order) and every figure (remaining
-// quantities, balances) is computed here from persisted records — never
-// taken from the model. Proposals are only shown; nothing is written.
+// Turns a validated intent into application-owned proposals (pending AI
+// actions). All matching (supplier, material, order) and every figure
+// (remaining quantities, balances) is computed here from persisted records —
+// never taken from the provider. Proposals are only shown; nothing is written.
 
 export interface Proposal {
   id: string;
@@ -34,34 +36,20 @@ export interface Proposal {
 export interface ProposalResult {
   blocks: AssistantBlock[];
   proposals: Proposal[];
+  /** Records this reply is about (for follow-up questions). */
+  refs?: { orderIds?: string[]; supplierIds?: string[]; materialIds?: string[] };
+}
+
+/** Context the assistant adds to an intent: the analyzed document and the conversation focus. */
+export interface ProposalOptions {
+  document?: Attachment;
+  /** Order the conversation was last about, used only when the message names none. */
+  focusOrderId?: string;
 }
 
 const newId = () => crypto.randomUUID();
 
-export function supplierCandidates(ledger: Ledger): (SupplierCandidate & { category: string })[] {
-  return ledger.s.suppliers.map((s) => ({ id: s.id, name: s.name, aliases: safeJsonArray(s.aliases), category: s.category }));
-}
-
-export function materialCandidates(ledger: Ledger): MaterialCandidate[] {
-  return ledger.s.materials.filter((m) => m.active).map((m) => ({ id: m.id, name: m.name, shortName: m.shortName, aliases: ledger.materialAliases(m.id), baseUnit: m.baseUnit }));
-}
-
-function safeJsonArray(raw: string): string[] {
-  try {
-    const v = JSON.parse(raw) as unknown;
-    return Array.isArray(v) ? v.map(String) : [];
-  } catch {
-    return [];
-  }
-}
-
-function titleCase(text: string): string {
-  return text
-    .trim()
-    .split(/\s+/)
-    .map((w, i) => (i > 0 && ["de", "del", "la", "las", "los", "y", "el"].includes(w.toLowerCase()) ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1)))
-    .join(" ");
-}
+export { materialCandidates, resolveSupplierMention } from "./resolve";
 
 function text(t: string): AssistantBlock {
   return { type: "text", text: t };
@@ -71,20 +59,14 @@ function dateOr(value: string | null, today: string): string {
   return value && isValidDate(value) ? value : today;
 }
 
-export function resolveSupplierMention(ledger: Ledger, mention: string | null) {
-  if (!mention) return { status: "new" as const, id: null as string | null, name: "", candidates: [] as MatchOption[] };
-  const result = matchSupplier(mention, supplierCandidates(ledger));
-  return {
-    status: result.status,
-    id: result.status === "new" ? null : result.best!.id,
-    name: result.status === "new" ? titleCase(mention) : result.best!.name,
-    candidates: result.candidates.map((c) => ({ id: c.item.id, name: c.item.name })),
-  };
+function orderChips(ledger: Ledger, orders: Order[], prompt: (o: Order) => string, icon: SuggestedAction["icon"]): AssistantBlock {
+  return { type: "actions", actions: orders.slice(0, 4).map((o) => ({ label: `Pedido ${ledger.orderNumber(o)} · ${ledger.supplierName(o.supplierId)}`, icon, prompt: prompt(o) })) };
 }
 
 // ------------------------------------------------------------------ orders
 
-export function proposeOrder(ledger: Ledger, ex: Extraction, today: string, document?: Attachment): ProposalResult {
+export function proposeOrder(ledger: Ledger, ex: CreateOrderIntent, today: string, options: ProposalOptions = {}): ProposalResult {
+  const document = options.document;
   const materials = materialCandidates(ledger);
   const flags: string[] = [];
   const items: InterpretedOrderItem[] = ex.items
@@ -122,7 +104,7 @@ export function proposeOrder(ledger: Ledger, ex: Extraction, today: string, docu
   }
   if (supplier.status !== "matched") flags.push("supplierName");
   if (items.some((i) => i.match !== "matched")) flags.push("items");
-  if (!ex.orderedBy) flags.push("orderedBy");
+  if (!ex.requestedBy) flags.push("orderedBy");
   const interpretation: OrderInterpretation = {
     kind: "order",
     supplierId: supplier.id,
@@ -131,7 +113,7 @@ export function proposeOrder(ledger: Ledger, ex: Extraction, today: string, docu
     supplierCandidates: supplier.candidates.length ? supplier.candidates : undefined,
     number: ex.orderReference ?? "",
     date: dateOr(ex.date, today),
-    orderedBy: ex.orderedBy ? personName(ledger, ex.orderedBy) : "",
+    orderedBy: ex.requestedBy ? personName(ledger, ex.requestedBy) : "",
     mode: ex.purchaseMode ?? "cuenta_corriente",
     items,
     statedTotal: ex.orderTotal === null ? null : parseMoneyToMinor(ex.orderTotal),
@@ -154,6 +136,7 @@ export function proposeOrder(ledger: Ledger, ex: Extraction, today: string, docu
   return {
     blocks: [text(lead), ...(notes.length ? [{ type: "note" as const, text: notes.join(" ") }] : []), { type: "interpretation", id, interpretation, state: "pending" }],
     proposals: [{ id, intent: "create_order", interpretation }],
+    refs: { supplierIds: supplier.id ? [supplier.id] : [], materialIds: items.flatMap((i) => (i.materialId ? [i.materialId] : [])) },
   };
 }
 
@@ -187,13 +170,19 @@ export function deliveryItemsFor(ledger: Ledger, order: Order, requested: Map<st
   return { items, over };
 }
 
+type DeliveredMention = { material: string; quantity: number | null; unit?: string | null };
+
 /** Matches mentioned materials to the lines of one order; returns requested milli per order line. */
-function requestedByLine(ledger: Ledger, order: Order, ex: Extraction): { map: Map<string, number>; unmatched: string[] } {
+function requestedByLine(ledger: Ledger, order: Order, mentions: DeliveredMention[]): { map: Map<string, number>; unmatched: string[] } {
   const lines = ledger.items(order.id);
-  const candidates = lines.map((i) => ({ ...materialCandidates(ledger).find((m) => m.id === i.materialId)!, lineId: i.id }));
+  const catalog = materialCandidates(ledger);
+  const candidates = lines.flatMap((i) => {
+    const m = catalog.find((c) => c.id === i.materialId);
+    return m ? [{ ...m, lineId: i.id }] : [];
+  });
   const map = new Map<string, number>();
   const unmatched: string[] = [];
-  for (const it of ex.items) {
+  for (const it of mentions) {
     if (it.quantity === null) continue;
     const match = matchMaterial(it.material, candidates);
     const milli = toMilli(it.quantity);
@@ -213,7 +202,12 @@ function openOrders(ledger: Ledger, supplierId?: string | null): Order[] {
     .sort((a, b) => a.orderDate.localeCompare(b.orderDate));
 }
 
-export function buildDeliveryInterpretation(ledger: Ledger, order: Order, requested: Map<string, number> | "all", base: { remito: string; date: string; document?: Attachment; flags: string[] }) {
+export function buildDeliveryInterpretation(
+  ledger: Ledger,
+  order: Order,
+  requested: Map<string, number> | "all",
+  base: { remito: string; date: string; document?: Attachment; flags: string[]; completesOrder?: boolean },
+) {
   const { items, over } = deliveryItemsFor(ledger, order, requested);
   const interpretation: DeliveryInterpretation = {
     kind: "delivery",
@@ -224,71 +218,96 @@ export function buildDeliveryInterpretation(ledger: Ledger, order: Order, reques
     remito: base.remito,
     date: base.date,
     items,
+    completesOrder: base.completesOrder || undefined,
     document: base.document,
     flags: base.flags,
   };
   return { interpretation, over };
 }
 
-export function proposeDelivery(ledger: Ledger, ex: Extraction, today: string, document?: Attachment): ProposalResult {
+function deliveryPrompt(ledger: Ledger, order: Order, ex: RegisterDeliveryIntent | CompleteOrderDeliveryIntent): string {
+  const head = `Del pedido ${ledger.orderNumber(order)} de ${ledger.supplierName(order.supplierId)}`;
+  if (ex.intent === "complete_order_delivery" || !ex.items.length) return `${head} se entregó todo lo pendiente`;
+  return `${head} llegaron ${ex.items.map((i) => `${formatNumber(i.quantity)} ${i.unit ?? ""} ${i.material}`.replace(/\s+/g, " ")).join(" y ")}`;
+}
+
+export function proposeDelivery(ledger: Ledger, ex: RegisterDeliveryIntent | CompleteOrderDeliveryIntent, today: string, options: ProposalOptions = {}): ProposalResult {
+  const document = options.document;
+  const completes = ex.intent === "complete_order_delivery";
+  const mentions: DeliveredMention[] = ex.intent === "register_delivery" ? ex.items : [];
   const supplier = ex.supplier ? resolveSupplierMention(ledger, ex.supplier) : null;
   const supplierId = supplier && supplier.status !== "new" ? supplier.id : null;
   let order: Order | undefined;
   let inferred = false;
   let alternatives: Order[] = [];
   if (ex.orderReference) {
-    const found = findOrdersByReference(ex.orderReference, ledger.s.orders, supplierId ?? undefined);
-    if (!found.length) {
+    const found = resolveOrderReference(ledger, ex.orderReference, supplierId);
+    if (found.status === "not_found") {
       return { blocks: [text(`No encontré el pedido ${ex.orderReference}${supplierId ? ` de ${ledger.supplierName(supplierId)}` : ""}. Revisa el número o cuéntame primero qué se pidió.`)], proposals: [] };
     }
-    if (found.length > 1) {
+    if (found.status !== "ok") {
+      const orders = found.candidates.map((c) => ledger.order(c.id)!);
+      return {
+        blocks: [text(`Hay ${orders.length} pedidos ${ex.orderReference}. ¿De qué proveedor es la entrega?`), orderChips(ledger, orders, (o) => deliveryPrompt(ledger, o, ex), "truck")],
+        proposals: [],
+      };
+    }
+    order = found.value;
+  } else if (options.focusOrderId && ledger.order(options.focusOrderId) && ledger.orderDeliveryStatus(ledger.order(options.focusOrderId)!) !== "entregado" && (!supplierId || ledger.order(options.focusOrderId)!.supplierId === supplierId)) {
+    // "Llegó todo lo pendiente" right after talking about one order.
+    order = ledger.order(options.focusOrderId);
+    inferred = true;
+  } else {
+    const catalog = materialCandidates(ledger);
+    const materials = mentions.flatMap((it) => {
+      const m = matchMaterial(it.material, catalog);
+      return m.status === "new" ? [] : [{ materialId: m.best!.id, quantityMilli: it.quantity === null ? null : toMilli(it.quantity) }];
+    });
+    const pool = openOrders(ledger, supplierId);
+    const ranked = rankOrderCandidates(ledger, { supplierId, date: ex.date, materials }, pool);
+    if (ranked.status === "not_found") {
       return {
         blocks: [
-          text(`Hay ${found.length} pedidos ${ex.orderReference}. ¿De qué proveedor es la entrega?`),
-          { type: "actions", actions: found.map((o) => ({ label: ledger.supplierName(o.supplierId), icon: "truck" as const, prompt: `Del pedido ${ledger.orderNumber(o)} de ${ledger.supplierName(o.supplierId)} llegó todo lo pendiente` })) },
+          text(
+            mentions.length
+              ? `No encontré pedidos con ${mentions.map((i) => i.material).join(" y ")} pendientes de entrega${supplierId ? ` de ${ledger.supplierName(supplierId)}` : ""}. Si es material de un pedido nuevo, cuéntame primero qué se pidió y a quién.`
+              : `No sé de qué pedido es la entrega${supplierId ? ` de ${ledger.supplierName(supplierId)}` : ""}. Indícame el número de pedido.`,
+          ),
         ],
         proposals: [],
       };
     }
-    order = found[0];
-  } else {
-    const wanted = ex.items.map((it) => matchMaterial(it.material, materialCandidates(ledger))).filter((m) => m.status !== "new").map((m) => m.best!.id);
-    const pool = openOrders(ledger, supplierId);
-    const candidates = wanted.length ? pool.filter((o) => ledger.items(o.id).some((i) => wanted.includes(i.materialId) && ledger.remainingMilli(i) > 0)) : pool;
-    if (!candidates.length) {
+    if (ranked.status !== "ok") {
+      // Close candidates are never picked automatically.
+      const orders = ranked.candidates.map((c) => ledger.order(c.id)!);
       return {
-        blocks: [text(ex.items.length ? `No encontré pedidos con ${ex.items.map((i) => i.material).join(" y ")} pendientes de entrega${supplierId ? ` de ${ledger.supplierName(supplierId)}` : ""}. Si es material de un pedido nuevo, cuéntame primero qué se pidió y a quién.` : "No encontré pedidos con entregas pendientes. Si es material de un pedido nuevo, cuéntame primero qué se pidió y a quién.")],
+        blocks: [text(`Hay ${orders.length} pedidos que podrían corresponder a esta entrega. ¿De cuál es?`), orderChips(ledger, orders, (o) => deliveryPrompt(ledger, o, ex), "truck")],
         proposals: [],
+        refs: { orderIds: orders.map((o) => o.id) },
       };
     }
-    // Prefer the order whose remaining quantities match what arrived exactly, then the oldest.
-    const score = (o: Order) => {
-      const { map } = requestedByLine(ledger, o, ex);
-      let s = 0;
-      for (const [lineId, milli] of map) {
-        const item = ledger.orderItem(lineId)!;
-        if (ledger.remainingMilli(item) === milli) s += 2;
-        else if (ledger.remainingMilli(item) > milli) s += 1;
-      }
-      return s;
-    };
-    const ranked = [...candidates].sort((a, b) => score(b) - score(a) || a.orderDate.localeCompare(b.orderDate));
-    order = ranked[0];
-    alternatives = ranked.slice(1);
+    order = ranked.value;
+    alternatives = ranked.ranked.filter((o) => o.id !== order!.id);
     inferred = true;
   }
   if (!order) return { blocks: [text("No encontré el pedido de esta entrega.")], proposals: [] };
   if (ledger.orderDeliveryStatus(order) === "entregado") {
-    return { blocks: [text(`El pedido ${ledger.orderNumber(order)} ya figura como entregado completo. Si llegó algo más, puede ser de otro pedido.`)], proposals: [] };
+    return { blocks: [text(`El pedido ${ledger.orderNumber(order)} ya figura como entregado completo. Si llegó algo más, puede ser de otro pedido.`)], proposals: [], refs: { orderIds: [order.id] } };
   }
-  const all = ex.deliverAllPending || ex.items.length === 0;
-  const { map, unmatched } = all ? { map: new Map<string, number>(), unmatched: [] as string[] } : requestedByLine(ledger, order, ex);
+  const all = completes || mentions.length === 0;
+  const { map, unmatched } = all ? { map: new Map<string, number>(), unmatched: [] as string[] } : requestedByLine(ledger, order, mentions);
   const flags: string[] = [];
-  if (!ex.remito) flags.push("remito");
+  if (!ex.deliveryReference) flags.push("remito");
   if (inferred) flags.push("orderNumber");
-  const { interpretation, over } = buildDeliveryInterpretation(ledger, order, all ? "all" : map, { remito: ex.remito ?? "", date: dateOr(ex.date, today), document, flags });
+  const { interpretation, over } = buildDeliveryInterpretation(ledger, order, all ? "all" : map, {
+    remito: ex.deliveryReference ?? "",
+    date: dateOr(ex.date, today),
+    document,
+    flags,
+    completesOrder: all,
+  });
   if (interpretation.items.every((i) => i.now === 0)) {
-    return { blocks: [text(`No encontré ${unmatched.length ? unmatched.join(" y ") : "esos materiales"} entre lo pendiente del pedido ${ledger.orderNumber(order)}. Revisa el pedido o indícame el número correcto.`)], proposals: [] };
+    return { blocks: [text(`No encontré ${unmatched.length ? unmatched.join(" y ") : "esos materiales"} entre lo pendiente del pedido ${ledger.orderNumber(order)}. Revisa el pedido o indícame el número correcto.`)], proposals: [], refs: { orderIds: [order.id] } };
   }
   const supplierName = ledger.supplierName(order.supplierId);
   const pendingBefore = ledger.orderDeliveryStatus(order);
@@ -306,7 +325,8 @@ export function proposeDelivery(ledger: Ledger, ex: Extraction, today: string, d
   const id = newId();
   return {
     blocks: [text(lead), ...(notes.length ? [{ type: "note" as const, text: notes.join(" ") }] : []), { type: "interpretation", id, interpretation, state: "pending" }],
-    proposals: [{ id, intent: ex.deliverAllPending ? "complete_order_delivery" : "register_delivery", interpretation }],
+    proposals: [{ id, intent: ex.intent, interpretation }],
+    refs: { orderIds: [order.id], supplierIds: [order.supplierId] },
   };
 }
 
@@ -366,20 +386,43 @@ function interpretationBlocks(lead: string | null, interpretation: PaymentInterp
   };
 }
 
-export function proposePayment(ledger: Ledger, ex: Extraction, today: string, document?: Attachment): ProposalResult {
+export function proposePayment(ledger: Ledger, ex: CreateSupplierPaymentIntent | PayOrderBalanceIntent, today: string, options: ProposalOptions = {}): ProposalResult {
+  const document = options.document;
+  const payFull = ex.intent === "pay_order_balance";
   const date = dateOr(ex.date, today);
   const method = ex.paymentMethod ?? "transferencia";
-  let amount = ex.amount === null ? null : parseMoneyToMinor(ex.amount);
+  const allocations = ex.intent === "create_supplier_payment" ? ex.allocations : [];
+  const toCurrentAccount = ex.intent === "create_supplier_payment" && ex.toCurrentAccount;
+  if (ex.intent === "create_supplier_payment" && ex.currency === "USD") {
+    return { blocks: [text("Por ahora solo registro pagos en pesos. Indícame el importe en pesos que se pagó.")], proposals: [] };
+  }
+  let amount = ex.intent === "create_supplier_payment" && ex.amount !== null ? parseMoneyToMinor(ex.amount) : null;
   const supplierMention = ex.supplier ? resolveSupplierMention(ledger, ex.supplier) : null;
   let supplierId = supplierMention && supplierMention.status !== "new" ? supplierMention.id : null;
 
   let order: Order | undefined;
-  if (ex.orderReference && !ex.allocations.length) {
-    const found = findOrdersByReference(ex.orderReference, ledger.s.orders, supplierId ?? undefined);
-    if (found.length === 1) order = found[0];
-    else if (found.length > 1) return { blocks: [text(`Hay más de un pedido ${ex.orderReference}. ¿De qué proveedor es el pago?`)], proposals: [] };
-    else if (ex.paysFullOrderBalance || ex.intent === "pay_order_balance") return { blocks: [text(`No encontré el pedido ${ex.orderReference}. Revisa el número.`)], proposals: [] };
+  if (ex.orderReference && !allocations.length) {
+    const found = resolveOrderReference(ledger, ex.orderReference, supplierId);
+    if (found.status === "ok") order = found.value;
+    else if (found.status === "ambiguous") {
+      const orders = found.candidates.map((c) => ledger.order(c.id)!);
+      return {
+        blocks: [
+          text(`Hay más de un pedido ${ex.orderReference}. ¿De qué proveedor es el pago?`),
+          orderChips(ledger, orders, (o) => (payFull ? `Pagamos completo el pedido ${ledger.orderNumber(o)} de ${ledger.supplierName(o.supplierId)}` : `Pagamos ${amount ? formatMoney(amount) : ""} al pedido ${ledger.orderNumber(o)} de ${ledger.supplierName(o.supplierId)}`.replace("  ", " ")), "store"),
+        ],
+        proposals: [],
+      };
+    } else if (payFull) return { blocks: [text(`No encontré el pedido ${ex.orderReference}. Revisa el número.`)], proposals: [] };
     if (order) supplierId = order.supplierId;
+  } else if (payFull && !ex.orderReference && options.focusOrderId && ledger.order(options.focusOrderId)) {
+    // "Pagalo completo" right after talking about one order.
+    order = ledger.order(options.focusOrderId);
+    supplierId = order!.supplierId;
+  }
+
+  if (payFull && !order) {
+    return { blocks: [text("¿Qué pedido se pagó completo? Indícame el número, por ejemplo «Pagamos completo el pedido 38».")], proposals: [] };
   }
 
   if (!supplierId) {
@@ -394,63 +437,86 @@ export function proposePayment(ledger: Ledger, ex: Extraction, today: string, do
   }
   const supplierName = ledger.supplierName(supplierId);
 
-  // "Pagamos completo el pedido 27": the amount is the order's known outstanding balance — never invented.
-  if (order && (ex.paysFullOrderBalance || ex.intent === "pay_order_balance")) {
-    const value = ledger.orderValue(order);
-    if (value === null) {
+  // "Pagamos completo el pedido 38": the amount is the order's known outstanding balance — never invented.
+  if (order && payFull) {
+    const financial = orderFinancialSummary(ledger, order);
+    if (financial.knownTotalMinor === null || financial.remainingBalanceMinor === null) {
       return {
         blocks: [
           text(`El pedido ${ledger.orderNumber(order)} de ${supplierName} no tiene importe cargado, así que no puedo calcular cuánto falta pagar. Dime cuánto se pagó (por ejemplo «Pagamos $250.000 al pedido ${ledger.orderNumber(order)}») o completa los precios en el pedido.`),
           { type: "actions", actions: [{ label: "Ver pedidos", icon: "clipboard-list", link: { to: "/pedidos" } }] },
         ],
         proposals: [],
+        refs: { orderIds: [order.id], supplierIds: [supplierId] },
       };
     }
-    const pending = ledger.orderPending(order)!;
-    if (pending === 0) return { blocks: [text(`El pedido ${ledger.orderNumber(order)} ya está pagado completo. Si es otro pago, puedo registrarlo a la cuenta corriente de ${supplierName}.`)], proposals: [] };
-    const paid = ledger.orderPaid(order.id);
-    const interpretation = paymentProposal(ledger, { supplierId, amount: pending, date, method, allocation: { type: "order", orderId: order.id, orderNumber: ledger.orderNumber(order) }, document, flags: ex.paymentMethod ? [] : ["method"] });
-    return interpretationBlocks(
-      `El pedido ${ledger.orderNumber(order)} vale ${formatMoney(value)}${paid ? ` y ya tiene ${formatMoney(paid)} imputados` : ""}: el saldo es ${formatMoney(pending)}. Revisa antes de guardar:`,
-      interpretation,
-      "pay_order_balance",
+    const pending = financial.remainingBalanceMinor;
+    if (pending === 0) return { blocks: [text(`El pedido ${ledger.orderNumber(order)} ya está pagado completo. Si es otro pago, puedo registrarlo a la cuenta corriente de ${supplierName}.`)], proposals: [], refs: { orderIds: [order.id] } };
+    const interpretation = paymentProposal(ledger, {
+      supplierId,
+      amount: pending,
+      date,
+      method,
+      reference: ex.paymentReference ?? undefined,
+      allocation: { type: "order", orderId: order.id, orderNumber: ledger.orderNumber(order) },
+      paysOrderBalance: true,
+      document,
+      flags: ex.paymentMethod ? [] : ["method"],
+    });
+    return withRefs(
+      interpretationBlocks(
+        `El pedido ${ledger.orderNumber(order)} vale ${formatMoney(financial.knownTotalMinor)}${financial.allocatedPaidMinor ? ` y ya tiene ${formatMoney(financial.allocatedPaidMinor)} imputados` : ""}: el saldo es ${formatMoney(pending)}. Revisa antes de guardar:`,
+        interpretation,
+        "pay_order_balance",
+      ),
+      { orderIds: [order.id], supplierIds: [supplierId] },
     );
   }
 
   if (amount === null || amount <= 0) {
-    return { blocks: [text(`¿De cuánto fue el pago a ${supplierName}? Puedes escribir el importe o adjuntar el comprobante de la transferencia.`)], proposals: [] };
+    return { blocks: [text(`¿De cuánto fue el pago a ${supplierName}? Puedes escribir el importe o adjuntar el comprobante de la transferencia.`)], proposals: [], refs: { supplierIds: [supplierId] } };
   }
+  const reference = ex.paymentReference ?? undefined;
 
   // Explicit split: "600 mil al pedido 381 y 400 mil al 352".
-  if (ex.allocations.length) {
+  if (allocations.length) {
     const parts: { orderId: string; orderNumber: string; amount: number }[] = [];
     const problems: string[] = [];
-    for (const a of ex.allocations) {
-      const found = findOrdersByReference(a.orderReference, ledger.s.orders, supplierId);
+    for (const a of allocations) {
+      const found = resolveOrderReference(ledger, a.orderReference, supplierId);
       const partAmount = a.amount === null ? null : parseMoneyToMinor(a.amount);
-      if (found.length !== 1 || partAmount === null) {
+      if (found.status !== "ok" || partAmount === null) {
         problems.push(`pedido ${a.orderReference}`);
         continue;
       }
-      parts.push({ orderId: found[0]!.id, orderNumber: ledger.orderNumber(found[0]!), amount: partAmount });
+      parts.push({ orderId: found.value.id, orderNumber: ledger.orderNumber(found.value), amount: partAmount });
     }
     const total = parts.reduce((s, p) => s + p.amount, 0);
-    if (ex.amount === null) amount = total;
     if (problems.length) return { blocks: [text(`No pude identificar ${problems.join(" y ")} de ${supplierName}. Revisa los números de pedido.`)], proposals: [] };
     if (total > amount) return { blocks: [text(`Las partes (${formatMoney(total)}) suman más que el pago (${formatMoney(amount)}). Revisa los importes.`)], proposals: [] };
-    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, allocation: { type: "split", parts }, document, flags: [] });
-    return interpretationBlocks(`Entendí un pago de ${formatMoney(amount)} a ${supplierName} repartido entre ${parts.length} pedidos. Revisa antes de guardar:`, interpretation, "create_payment");
+    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, reference, allocation: { type: "split", parts }, document, flags: [] });
+    return withRefs(interpretationBlocks(`Entendí un pago de ${formatMoney(amount)} a ${supplierName} repartido entre ${parts.length} pedidos. Revisa antes de guardar:`, interpretation, "create_supplier_payment"), {
+      orderIds: parts.map((p) => p.orderId),
+      supplierIds: [supplierId],
+    });
   }
 
   if (order) {
-    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, allocation: { type: "order", orderId: order.id, orderNumber: ledger.orderNumber(order) }, document, flags: [] });
+    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, reference, allocation: { type: "order", orderId: order.id, orderNumber: ledger.orderNumber(order) }, document, flags: [] });
     const notes = interpretation.preview.unallocatedAmount ? [`El pago supera el saldo del pedido: ${formatMoney(interpretation.preview.unallocatedAmount)} quedarán sin imputar en la cuenta corriente.`] : [];
-    return interpretationBlocks(null, interpretation, "create_payment", notes);
+    return withRefs(interpretationBlocks(null, interpretation, "create_supplier_payment", notes), { orderIds: [order.id], supplierIds: [supplierId] });
   }
 
-  if (ex.toCurrentAccount || ex.intent === "record_supplier_account_payment") {
-    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, allocation: { type: "unallocated" }, document, flags: document ? ["amount"] : [] });
-    return interpretationBlocks(document ? `Es un comprobante de pago a ${supplierName}. Lo propongo como pago a cuenta corriente, sin imputar:` : null, interpretation, "record_supplier_account_payment");
+  if (toCurrentAccount) {
+    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, reference, allocation: { type: "unallocated" }, document, flags: document ? ["amount"] : [] });
+    return withRefs(
+      interpretationBlocks(
+        document ? `Es un comprobante de pago a ${supplierName}. Lo propongo como pago a cuenta corriente, sin imputar:` : `Entendí un pago de ${formatMoney(amount)} a la cuenta corriente de ${supplierName}, sin imputar a un pedido. Revisa antes de guardar:`,
+        interpretation,
+        "create_supplier_payment",
+      ),
+      { supplierIds: [supplierId] },
+    );
   }
 
   const open = ledger.s.orders.filter((o) => o.supplierId === supplierId && (ledger.orderPending(o) ?? 0) > 0).sort((a, b) => a.orderDate.localeCompare(b.orderDate));
@@ -458,20 +524,23 @@ export function proposePayment(ledger: Ledger, ex: Extraction, today: string, do
     // A receipt without an order number: suggest an order only when the amount matches its balance exactly.
     const exact = open.filter((o) => ledger.orderPending(o) === amount);
     const allocation = exact.length === 1 ? { type: "order" as const, orderId: exact[0]!.id, orderNumber: ledger.orderNumber(exact[0]!) } : { type: "unallocated" as const };
-    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, allocation, document, flags: ["allocation", "amount"] });
-    return interpretationBlocks(
-      exact.length === 1
-        ? `Es un comprobante de pago a ${supplierName} por ${formatMoney(amount)}, igual al saldo del pedido ${ledger.orderNumber(exact[0]!)}. Revisa la imputación antes de guardar:`
-        : `Es un comprobante de pago a ${supplierName} por ${formatMoney(amount)}. No indica pedido, así que lo propongo sin imputar:`,
-      interpretation,
-      "create_payment",
+    const interpretation = paymentProposal(ledger, { supplierId, amount, date, method, reference, allocation, document, flags: ["allocation", "amount"] });
+    return withRefs(
+      interpretationBlocks(
+        exact.length === 1
+          ? `Es un comprobante de pago a ${supplierName} por ${formatMoney(amount)}, igual al saldo del pedido ${ledger.orderNumber(exact[0]!)}. Revisa la imputación antes de guardar:`
+          : `Es un comprobante de pago a ${supplierName} por ${formatMoney(amount)}. No indica pedido, así que lo propongo sin imputar:`,
+        interpretation,
+        "create_supplier_payment",
+      ),
+      { supplierIds: [supplierId] },
     );
   }
 
   const missing: string[] = [];
   if (!ex.date) missing.push("la fecha");
   if (!ex.paymentMethod) missing.push("el medio de pago");
-  const options = [
+  const options_ = [
     ...open.slice(0, 3).map((o) => {
       const pending = ledger.orderPending(o) ?? 0;
       return { id: `order:${o.id}`, title: `Al pedido ${ledger.orderNumber(o)}`, description: `Saldo ${formatMoney(pending)} · ${amount! >= pending ? "quedaría pagado" : "quedaría con pago parcial"}` };
@@ -486,14 +555,19 @@ export function proposePayment(ledger: Ledger, ex: Extraction, today: string, do
       {
         type: "choice",
         id: newId(),
-        options,
-        selected: options[0]!.id,
+        options: options_,
+        selected: options_[0]!.id,
         warning: missing.length ? `Falta ${missing.join(" y ")}. Usaré ${[!ex.date ? "hoy" : "", !ex.paymentMethod ? "transferencia" : ""].filter(Boolean).join(" y ")} si no me dices otra cosa.` : undefined,
         context: { supplierId, amount, date, method },
       },
     ],
     proposals: [],
+    refs: { supplierIds: [supplierId] },
   };
+}
+
+function withRefs(result: ProposalResult, refs: ProposalResult["refs"]): ProposalResult {
+  return { ...result, refs };
 }
 
 export function resolvePaymentChoice(ledger: Ledger, optionId: string, context: { supplierId: string; amount: number; date?: string; method?: PaymentInterpretation["method"] }, today: string): ProposalResult {
@@ -510,7 +584,7 @@ export function resolvePaymentChoice(ledger: Ledger, optionId: string, context: 
     allocation: order ? { type: "order", orderId: order.id, orderNumber: ledger.orderNumber(order) } : { type: "unallocated" },
     flags: [],
   });
-  return interpretationBlocks(null, interpretation, order ? "create_payment" : "record_supplier_account_payment");
+  return interpretationBlocks(null, interpretation, "create_supplier_payment");
 }
 
 function assertSupplier(ledger: Ledger, id: string) {
@@ -518,15 +592,15 @@ function assertSupplier(ledger: Ledger, id: string) {
 }
 
 /** "Imputar el pago sin imputar de Hierros Córdoba al pedido 381". */
-export function proposeAllocation(ledger: Ledger, ex: Extraction): ProposalResult {
+export function proposeAllocation(ledger: Ledger, ex: AllocatePaymentIntent): ProposalResult {
   let order: Order | undefined;
   const mention = ex.supplier ? resolveSupplierMention(ledger, ex.supplier) : null;
   let supplierId = mention && mention.status !== "new" ? mention.id : null;
   if (ex.orderReference) {
-    const found = findOrdersByReference(ex.orderReference, ledger.s.orders, supplierId ?? undefined);
-    if (found.length === 1) {
-      order = found[0];
-      supplierId = order!.supplierId;
+    const found = resolveOrderReference(ledger, ex.orderReference, supplierId);
+    if (found.status === "ok") {
+      order = found.value;
+      supplierId = order.supplierId;
     }
   }
   if (!supplierId) return { blocks: [text("¿De qué proveedor es el pago que quieres imputar?")], proposals: [] };

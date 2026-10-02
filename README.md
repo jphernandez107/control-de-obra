@@ -17,7 +17,7 @@ npm run db:seed           # creates ./data/casa-cordoba.db with demo data (re-ru
 npm run dev               # API on :8787 + web on http://localhost:5173 (Vite proxies /api)
 ```
 
-Without `ANTHROPIC_API_KEY` the app uses the deterministic **mock AI provider**, so every flow works offline. Set `ANTHROPIC_API_KEY` (and optionally `AI_PROVIDER=anthropic`) to use Claude.
+Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=mock`), so every flow works offline with no external AI service. Production runs with AI disabled until Cloudflare Workers AI is connected; see [docs/AI_HANDOFF.md](docs/AI_HANDOFF.md).
 
 | Script | What it does |
 | --- | --- |
@@ -33,7 +33,7 @@ Without `ANTHROPIC_API_KEY` the app uses the deterministic **mock AI provider**,
 
 ### Environment
 
-See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file), `DOCUMENTS_DIR` (local document storage), `AI_PROVIDER` (`auto` \| `mock` \| `anthropic` \| `disabled`), `ANTHROPIC_API_KEY`, `AI_MODEL` (default `claude-opus-5-5`), `AI_EFFORT`, `AUTH_MODE` (`dev` \| `cloudflare-access`), `DEV_USER_EMAIL`, `API_PORT`. Secrets are read only from the environment; `.env` is git-ignored.
+See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file), `DOCUMENTS_DIR` (local document storage), `AI_PROVIDER` (`mock` \| `cloudflare` \| `disabled`; default `mock` locally), `AI_MODEL` (model id for the Cloudflare provider), `AUTH_MODE` (`dev` \| `cloudflare-access`), `DEV_USER_EMAIL`, `API_PORT`. Secrets are read only from the environment; `.env` is git-ignored.
 
 ### Demo data
 
@@ -47,7 +47,7 @@ See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file)
 - Computation v2 (with a revision of Ø10): Acero Ø12 **exceeds** (111%), Acero Ø10 **approaching** (94%), Caño PVC **reached**, Codo PVC **without computation**
 - Stored PDF evidence for most records, and one past conversation
 
-Try in the assistant: «Marcelo pidió 20 barras del 12 y 30 del 10 a Hierros Córdoba.», «Del pedido 38 llegaron las 20 barras del 12 y 25 barras del 10.», «Se entregó todo lo pendiente del pedido 38.», «Pagamos $500.000 de la cuenta corriente de Hierros Córdoba.», «Pagamos completo el pedido 38.», «¿Cuánto debemos actualmente a Hierros Córdoba?», «¿Qué pedidos siguen pendientes de entrega?», «¿Cuánto acero Ø12 llevamos pedido?», «¿Nos estamos pasando del cómputo?», or attach a file from `samples/`.
+Try in the assistant: «Marcelo pidió 20 barras del 12 y 30 del 10 a Hierros Córdoba.», «Del pedido 38 llegaron las 20 barras del 12 y 25 barras del 10.», «Se entregó todo lo pendiente del pedido 38.», «Pagamos $500.000 de la cuenta corriente de Hierros Córdoba.», «Pagamos completo el pedido 38.», «¿Cuánto debemos actualmente a Hierros Córdoba?», «¿Qué pedidos siguen pendientes de entrega?», «¿Cuánto acero Ø12 llevamos pedido?», «¿Nos estamos pasando del cómputo?», «¿Cómo viene el pedido 38?» followed by «¿Y cuánto falta pagar?», or attach a file from `samples/`.
 
 ## Production (Cloudflare)
 
@@ -58,7 +58,7 @@ One Worker serves the built React app (Static Assets) and the API from one origi
 | Entry | `server/node.ts` (Hono on Node) | `server/worker.ts` (same Hono app) |
 | Database | SQLite file via libsql (`data/casa-cordoba.db`) | D1 `casa-cordoba`, binding `DB` |
 | Documents | `LocalFileStorage` (`data/documents/`) | private R2 bucket `casa-cordoba-documents`, binding `DOCUMENTS` (`server/storage/r2.ts`) |
-| AI | mock or Anthropic (`AI_PROVIDER`) | **disabled** (`AI_PROVIDER=disabled`): the assistant answers «La función de IA todavía no está configurada.» |
+| AI | deterministic mock (`AI_PROVIDER=mock`) | **disabled** (`AI_PROVIDER=disabled`): the assistant answers «La función de IA todavía no está configurada.» `AI_PROVIDER=cloudflare` is accepted and becomes active once the Workers AI adapter is implemented ([handoff](docs/AI_HANDOFF.md)) |
 | Identity | fixed dev user | HTTP Basic login checked against the `APP_USERS` secret |
 
 Configuration lives in [`wrangler.jsonc`](wrangler.jsonc) (Worker `casa-cordoba`, bindings `DB`, `DOCUMENTS`, `ASSETS`, vars `AI_PROVIDER`, `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_DAY`, `MAX_DOCUMENTS_TOTAL_MB`). The only secret is `APP_USERS`. Local development never talks to Cloudflare.
@@ -149,7 +149,7 @@ Docs used: [Workers limits](https://developers.cloudflare.com/workers/platform/l
 - **Web**: React 19 · TypeScript · Vite · TanStack Router/Query · Tailwind CSS v4 (unchanged UI)
 - **API**: Hono (runs on Node via `@hono/node-server`, and on Cloudflare Workers unchanged)
 - **Data**: Drizzle ORM · SQLite (libsql locally) · migrations in `drizzle/` (D1-compatible SQL)
-- **AI**: provider interface with `MockAIProvider` and `AnthropicAIProvider` (`@anthropic-ai/sdk`, structured outputs validated with Zod)
+- **AI**: provider-independent interface (`AIProvider`, `DocumentContentExtractor`), validated intents (Zod), deterministic `MockAIProvider`, Cloudflare Workers AI integration point (not connected yet)
 - **Tests**: Vitest, end-to-end through the HTTP app against a real SQLite file
 
 Architecture, domain rules and the Cloudflare migration path are described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -163,7 +163,9 @@ server/
   repositories/   snapshot loader (project working set, D1-safe queries)
   services/       commands (validated writes + audit), queries (read models), assistant (conversations,
                   proposals lifecycle), documents, computation import (CSV/XLSX)
-  ai/             provider interface + schemas, mock, anthropic, proposals (matching → proposals),
+  ai/             provider + extractor interfaces, intent schemas, errors, factory, mock, cloudflare (placeholder),
+                  prompts, resolve (matching), proposals, pending actions, project queries (read-only),
+                  conversation context,
                   answers (deterministic read queries), review (revise/confirm)
   storage/        DocumentStorage interface, LocalFileStorage (Node), MemoryStorage (tests)
   http/           Hono app (transport only) and identity boundary
@@ -174,7 +176,7 @@ src/
   …               pages, components and assistant feature (UI from the design)
 drizzle/          SQL migrations
 samples/          sample documents for trying document interpretation
-tests/            scenarios A–H, integrity rules, Anthropic adapter
+tests/            scenarios A–H, integrity rules, AI architecture (contract, errors, matching, queries, context, revalidation, Scenario F)
 ```
 
 ## What changed in the UI

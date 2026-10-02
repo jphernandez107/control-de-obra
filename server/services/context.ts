@@ -62,7 +62,9 @@ export class WriteSet {
   audit(entry: AuditEntry) {
     // Entries of one command get increasing timestamps so the feed keeps their order.
     const at = new Date(this.startedAt.getTime() + this.auditSeq++).toISOString();
-    const metadata = { ...(entry.metadata ?? {}), ...(entry.tags ? { tags: entry.tags } : {}) };
+    // AI-assisted writes are marked as such; they only happen after an explicit user confirmation.
+    const origin = this.ctx.aiInterpretationId ? { origin: "ai", pendingActionId: this.ctx.aiInterpretationId } : {};
+    const metadata = { ...(entry.metadata ?? {}), ...(entry.tags ? { tags: entry.tags } : {}), ...origin };
     this.items.push(
       this.ctx.db.insert(auditLog).values({
         id: newId(),

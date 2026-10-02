@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import { eq } from "drizzle-orm";
-import { createProvider } from "./ai/factory";
+import { getAIProvider, getDocumentContentExtractor } from "./ai/factory";
 import { loadConfig } from "./config";
 import { migrateDatabase, openDatabase } from "./db/node";
 import { projects } from "./db/schema";
@@ -19,15 +19,16 @@ if (!project) {
   process.exit(1);
 }
 
-const ai = createProvider(config);
+const ai = getAIProvider(config.ai);
 const app = createApp({
   db,
   storage: new LocalFileStorage(config.documentsDir),
   ai,
+  documentExtractor: (bytes) => getDocumentContentExtractor(config.ai, bytes),
   projectId: project.id,
   auth: { mode: config.authMode, devUserEmail: config.devUserEmail },
 });
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`API de Casa Córdoba en http://localhost:${info.port}/api · proyecto «${project.name}» · IA: ${ai.name}${ai.model ? ` (${ai.model})` : ""}`);
+  console.log(`API de Casa Córdoba en http://localhost:${info.port}/api · proyecto «${project.name}» · IA: ${ai.id}${ai.configured ? "" : " (sin configurar)"}`);
 });

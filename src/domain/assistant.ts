@@ -25,6 +25,13 @@ export interface MatchOption {
 /** Field keys the assistant is unsure about and wants the user to verify. */
 export type FlaggedField = string;
 
+/** Server validation of a pending AI action, recomputed on every edit and on confirm. */
+export interface InterpretationValidation {
+  /** ready: can be confirmed · needs_review: has warnings · blocked: cannot be confirmed yet. */
+  state: "ready" | "needs_review" | "blocked";
+  issues: { field: string; message: string; severity: "warning" | "error" }[];
+}
+
 export interface InterpretedOrderItem {
   id: ID;
   /** Catalog material, or `null` to create a new one named `material` on confirm. */
@@ -60,6 +67,7 @@ export interface OrderInterpretation {
   notes?: string;
   document?: Attachment;
   flags: FlaggedField[];
+  validation?: InterpretationValidation;
 }
 
 export interface InterpretedDeliveryItem {
@@ -81,8 +89,11 @@ export interface DeliveryInterpretation {
   remito: string;
   date: ISODate;
   items: InterpretedDeliveryItem[];
+  /** "Se entregó todo lo pendiente": confirm re-checks that this still is everything pending. */
+  completesOrder?: boolean;
   document?: Attachment;
   flags: FlaggedField[];
+  validation?: InterpretationValidation;
 }
 
 export type PaymentAllocation =
@@ -114,8 +125,11 @@ export interface PaymentInterpretation {
   reference?: string;
   /** Set when this proposal allocates an existing unallocated payment instead of creating one. */
   existingPaymentId?: ID;
+  /** "Pagamos completo el pedido X": confirm re-checks that the amount still equals the order balance. */
+  paysOrderBalance?: boolean;
   document?: Attachment;
   flags: FlaggedField[];
+  validation?: InterpretationValidation;
 }
 
 export type Interpretation = OrderInterpretation | DeliveryInterpretation | PaymentInterpretation;
@@ -181,6 +195,8 @@ export type AssistantBlock =
       context: { supplierId: ID; amount: number; date?: ISODate; method?: PaymentMethod; documentId?: ID };
     }
   | { type: "read_error"; fileName: string }
+  /** AI provider/document failure (codes: AI_NOT_CONFIGURED, AI_PROVIDER_UNAVAILABLE, AI_QUOTA_EXCEEDED, AI_INVALID_RESPONSE, AI_DOCUMENT_UNSUPPORTED, AI_INTERPRETATION_AMBIGUOUS). */
+  | { type: "ai_error"; code: string; message: string; hint?: string }
   | {
       type: "balance";
       supplierId: ID;

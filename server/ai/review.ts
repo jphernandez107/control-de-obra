@@ -64,9 +64,47 @@ function reviseDelivery(ledger: Ledger, i: DeliveryInterpretation): DeliveryInte
     remito: i.remito,
     date: i.date,
     document: i.document,
-    flags: i.flags.filter((f) => f !== "orderNumber"),
+    flags: sameOrder ? i.flags : i.flags.filter((f) => f !== "orderNumber"),
+    completesOrder: i.completesOrder,
   });
   return interpretation;
+}
+
+/** "Todo lo pendiente" recomputed from current deliveries. */
+export function refreshCompleteDelivery(ledger: Ledger, i: DeliveryInterpretation): DeliveryInterpretation {
+  const order = ledger.order(i.orderId);
+  if (!order) return i;
+  return buildDeliveryInterpretation(ledger, order, "all", { remito: i.remito, date: i.date, document: i.document, flags: i.flags, completesOrder: true }).interpretation;
+}
+
+/**
+ * Values the user saw and confirmed must still hold against current data;
+ * otherwise the confirmation is rejected and a refreshed proposal is returned
+ * for a new review. Never trust figures computed when the proposal was made.
+ */
+export function staleProposal(ledger: Ledger, submitted: Interpretation, final: Interpretation): { interpretation: Interpretation; message: string } | null {
+  if (submitted.kind === "delivery" && final.kind === "delivery") {
+    if (submitted.completesOrder) {
+      const fresh = refreshCompleteDelivery(ledger, submitted);
+      const same =
+        fresh.items.length === submitted.items.length && fresh.items.every((f) => submitted.items.some((s) => s.orderLineId === f.orderLineId && s.now === f.now && s.before === f.before));
+      if (!same) return { interpretation: fresh, message: `Lo pendiente del pedido ${submitted.orderNumber} cambió desde la propuesta. Revisa las cantidades actualizadas antes de confirmar.` };
+      return null;
+    }
+    const changed = submitted.items.some((s) => s.now > 0 && final.items.find((f) => f.orderLineId === s.orderLineId)?.now !== s.now);
+    if (changed) return { interpretation: final, message: `Las entregas del pedido ${submitted.orderNumber} cambiaron desde la propuesta. Revisa las cantidades actualizadas antes de confirmar.` };
+  }
+  if (submitted.kind === "payment" && final.kind === "payment" && submitted.paysOrderBalance && submitted.allocation.type === "order") {
+    const order = ledger.order(submitted.allocation.orderId);
+    const pending = order ? ledger.orderPending(order) : null;
+    if (pending !== null && pending > 0 && pending !== submitted.amount) {
+      return {
+        interpretation: withPaymentPreview(ledger, { ...submitted, amount: pending }),
+        message: `El saldo del pedido ${submitted.allocation.orderNumber} cambió desde la propuesta: ahora es ${formatMoney(pending)}. Revisa el importe antes de confirmar.`,
+      };
+    }
+  }
+  return null;
 }
 
 export function reviseInterpretation(ledger: Ledger, i: Interpretation): Interpretation {

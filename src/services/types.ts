@@ -32,7 +32,8 @@ import type {
 export interface Session {
   today: ISODate;
   user: { userId: ID; name: string; role: string };
-  ai: { provider: string; model: string | null };
+  /** AI provider id (mock | cloudflare | disabled) and whether it can serve requests. */
+  ai: { provider: string; configured: boolean; model: string | null };
 }
 
 export interface OrderCorrection {

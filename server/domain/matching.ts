@@ -154,3 +154,67 @@ export function findOrdersByReference<T extends OrderCandidate>(ref: string, ord
   const asNumber = /^\d+$/.test(wanted) ? Number(wanted) : NaN;
   return pool.filter((o) => !o.reference && o.internalNumber === asNumber);
 }
+
+/** What is known about the order a delivery/payment/document refers to. */
+export interface OrderMatchCriteria {
+  reference?: string | null;
+  supplierId?: string | null;
+  /** Date of the delivery or document (YYYY-MM-DD). */
+  date?: string | null;
+  /** Materials mentioned, with the quantity that arrived when known (thousandths). */
+  materials?: { materialId: string; quantityMilli?: number | null }[];
+}
+
+export interface RankableOrder extends OrderCandidate {
+  orderDate: string;
+  materialIds: string[];
+  /** Materials with something still to deliver. */
+  openMaterialIds: string[];
+  /** Remaining quantity per material (thousandths), for quantity fit. */
+  remainingByMaterial?: Record<string, number>;
+}
+
+function daysBetween(a: string, b: string): number {
+  return Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000;
+}
+
+/**
+ * Ranks orders for a document or a vague message. An explicit reference that
+ * matches is decisive ("matched"); otherwise the result is at best
+ * "suggested", scored by supplier, item overlap, quantity fit and date
+ * proximity, so the caller can flag it or ask when scores are close. A
+ * future AI-assisted selector can re-rank `candidates`; it should never
+ * bypass them.
+ */
+export function rankOrders<T extends RankableOrder>(criteria: OrderMatchCriteria, orders: T[]): MatchResult<T> {
+  const wantedRef = criteria.reference ? normalizeReference(criteria.reference) : "";
+  const wanted = criteria.materials ?? [];
+  const scored: MatchCandidate<T>[] = [];
+  for (const o of orders) {
+    if (criteria.supplierId && o.supplierId !== criteria.supplierId) continue;
+    if (wantedRef && o.reference && normalizeReference(o.reference) === wantedRef) {
+      scored.push({ item: o, score: 1 });
+      continue;
+    }
+    let score = criteria.supplierId ? 0.2 : 0.1;
+    if (wanted.length) {
+      const hits = wanted.filter((w) => o.openMaterialIds.includes(w.materialId));
+      if (!hits.length) continue;
+      score += 0.4 * (hits.length / wanted.length);
+      const withQty = wanted.filter((w) => w.quantityMilli);
+      if (withQty.length && o.remainingByMaterial) {
+        const fit = withQty.reduce((s, w) => {
+          const remaining = o.remainingByMaterial![w.materialId] ?? 0;
+          return s + (remaining === w.quantityMilli ? 1 : remaining > w.quantityMilli! ? 0.3 : 0);
+        }, 0);
+        score += 0.3 * (fit / withQty.length);
+      }
+    } else score += 0.3;
+    if (criteria.date) score += 0.1 * Math.max(0, 1 - daysBetween(criteria.date, o.orderDate) / 60);
+    scored.push({ item: o, score: Math.min(score, 0.99) });
+  }
+  const sorted = scored.sort((a, b) => b.score - a.score || a.item.orderDate.localeCompare(b.item.orderDate));
+  const top = sorted[0];
+  if (!top || top.score < WEAK_MATCH) return { status: "new", score: top?.score ?? 0, candidates: sorted.slice(0, 5) };
+  return { status: top.score === 1 ? "matched" : "suggested", best: top.item, score: top.score, candidates: sorted.slice(0, 5) };
+}

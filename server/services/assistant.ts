@@ -2,12 +2,15 @@ import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { AssistantBlock, Attachment, ChatMessage, ConfirmResponse, ConfirmResult, Conversation, Interpretation } from "../../src/domain/assistant";
 import type { AppDb } from "../db/client";
 import * as t from "../db/schema";
-import { answerQuery } from "../ai/answers";
-import { AINotConfiguredError } from "../ai/disabled";
-import { AIMalformedResponseError, AIUnavailableError, type AIContext, type AIProvider } from "../ai/provider";
+import { answerQuestion } from "../ai/answers";
+import { loadConversationContext, mergeRefs, type ContextRefs, type ConversationState } from "../ai/conversation-context";
+import type { DocumentContentExtractor } from "../ai/document-content";
+import { AI_ERROR_HINTS, AIError, isAIError, toAIError } from "../ai/errors";
+import { validationColumns, withValidation } from "../ai/pending-actions";
+import type { AIProjectContext, AIProvider } from "../ai/provider";
 import { proposeAllocation, proposeDelivery, proposeOrder, proposePayment, resolvePaymentChoice, type ProposalResult } from "../ai/proposals";
-import { confirmInterpretation, reviseInterpretation } from "../ai/review";
-import { ExtractionSchema, type Extraction } from "../ai/schemas";
+import { confirmInterpretation, reviseInterpretation, staleProposal } from "../ai/review";
+import { parseInterpretationResult, type AIInterpretationResult } from "../ai/schemas";
 import type { Ledger } from "../domain/derive";
 import { DomainError } from "../domain/errors";
 import { formatNumber } from "../../src/domain/format";
@@ -16,7 +19,6 @@ import { localDate, localDateTime } from "../domain/time";
 import type { DocumentStorage } from "../storage/storage";
 import { voidAllocations, voidRecord } from "./commands";
 import { newId, type Actor, type CommandContext } from "./context";
-import { AI_READABLE, readDocumentBytes } from "./documents";
 import { ledgerFor } from "./queries";
 
 // Conversation layer of the assistant. Chat history is stored for display
@@ -27,8 +29,19 @@ export interface AssistantDeps {
   db: AppDb;
   projectId: string;
   provider: AIProvider;
+  /** Turns a stored document into normalized text; interpretation never touches storage. */
+  extractor: DocumentContentExtractor;
   storage: DocumentStorage;
   now: () => Date;
+}
+
+/** What one interpretation produced, before it is stored. */
+interface Reply {
+  blocks: AssistantBlock[];
+  result?: ProposalResult;
+  interpretation?: AIInterpretationResult;
+  refs?: Partial<ContextRefs>;
+  documentId?: string;
 }
 
 type DocumentRow = typeof t.documents.$inferSelect;
@@ -57,23 +70,10 @@ export function toAttachment(doc: DocumentRow): Attachment {
   };
 }
 
+/** Spanish, user-facing state for any AI failure. Non-AI errors propagate. */
 function aiErrorBlocks(error: unknown): AssistantBlock[] {
-  if (error instanceof AINotConfiguredError) {
-    return [
-      { type: "text", text: `${error.message} No se guardó nada.` },
-      { type: "note", text: "Mientras tanto puedes registrar entregas y pagos desde Pedidos o Proveedores, y consultar saldos en Proveedores." },
-    ];
-  }
-  if (error instanceof AIUnavailableError) {
-    return [
-      { type: "text", text: `El asistente de IA no está disponible en este momento: ${error.message} No se guardó nada.` },
-      { type: "note", text: "Mientras tanto puedes registrar entregas y pagos desde Pedidos o Proveedores, y consultar saldos en Proveedores." },
-    ];
-  }
-  if (error instanceof AIMalformedResponseError) {
-    return [{ type: "text", text: "No pude interpretar la respuesta del asistente de IA. No se guardó nada; intenta reformular el mensaje o vuelve a enviarlo." }];
-  }
-  throw error;
+  if (!isAIError(error)) throw error;
+  return [{ type: "ai_error", code: error.code, message: `${error.message} No se guardó nada.`, hint: AI_ERROR_HINTS[error.code] }];
 }
 
 export class AssistantService {
@@ -182,7 +182,12 @@ export class AssistantService {
     return { conversationId: await this.ensureConversation(actor, undefined, "Nueva conversación") };
   }
 
-  private async appendMessage(conversationId: string, message: { role: "user" | "assistant"; text?: string; blocks?: AssistantBlock[]; authorUserId?: string; documentIds?: string[] }, at: Date): Promise<string> {
+  private async appendMessage(
+    conversationId: string,
+    message: { role: "user" | "assistant"; text?: string; blocks?: AssistantBlock[]; authorUserId?: string; documentIds?: string[]; refs?: Partial<ContextRefs> },
+    at: Date,
+  ): Promise<string> {
+    const refs = message.refs ? mergeRefs(message.refs) : null;
     const id = newId();
     const createdAt = at.toISOString();
     await this.db.batch([
@@ -193,6 +198,7 @@ export class AssistantService {
         text: message.text ?? null,
         blocks: message.blocks ? JSON.stringify(message.blocks) : null,
         authorUserId: message.authorUserId ?? null,
+        contextRefs: refs && (refs.orderIds.length || refs.supplierIds.length || refs.materialIds.length) ? JSON.stringify(refs) : null,
         createdAt,
       }),
       ...(message.documentIds ?? []).map((documentId) => this.db.insert(t.messageAttachments).values({ id: newId(), messageId: id, documentId })),
@@ -201,7 +207,7 @@ export class AssistantService {
     return id;
   }
 
-  private aiContext(ledger: Ledger, today: string): AIContext {
+  private projectContext(ledger: Ledger, today: string): AIProjectContext {
     return {
       today,
       suppliers: ledger.s.suppliers.map((s) => s.name),
@@ -220,77 +226,121 @@ export class AssistantService {
     };
   }
 
-  /** Interprets a message (and optional document) into answers or proposals. Never writes domain data. */
-  private async respond(ledger: Ledger, text: string, documents: DocumentRow[]): Promise<{ blocks: AssistantBlock[]; result?: ProposalResult; extraction?: Extraction; documentId?: string }> {
-    const today = localDate(this.deps.now(), ledger.tz);
-    const context = this.aiContext(ledger, today);
-    const doc = documents[0];
-    let extraction: Extraction;
+  /** Calls the provider for a message or document and validates its output. Throws AIError only. */
+  private async interpret(ledger: Ledger, today: string, text: string, doc: DocumentRow | undefined, conversation: ConversationState): Promise<AIInterpretationResult> {
+    const project = this.projectContext(ledger, today);
     try {
       if (doc) {
-        if (doc.mimeType === "text/csv" || doc.mimeType.includes("spreadsheet")) {
-          return { blocks: [{ type: "text", text: "Las planillas de cómputo se cargan desde Materiales y cómputo → Cargar cómputo. Aquí puedo leer comprobantes de pedido, remitos y comprobantes de pago (PDF o foto)." }, { type: "actions", actions: [{ label: "Ir a Materiales", icon: "clipboard-list", link: { to: "/materiales" } }] }] };
-        }
-        if (!AI_READABLE.has(doc.mimeType)) {
-          return { blocks: [{ type: "text", text: `No puedo leer archivos ${doc.mimeType.split("/")[1]?.toUpperCase()}. Envía el comprobante como JPG, PNG o PDF (en el iPhone: Ajustes → Cámara → Formatos → Más compatible).` }] };
-        }
-        const data = await readDocumentBytes(this.deps.storage, doc);
-        extraction = ExtractionSchema.parse(await this.deps.provider.analyzeDocument({ fileName: doc.fileName, mimeType: doc.mimeType, data, text: text || undefined, context }));
-      } else {
-        extraction = ExtractionSchema.parse(await this.deps.provider.interpret({ text, context }));
+        const content = await this.deps.extractor.extract({ id: doc.id, fileName: doc.fileName, mimeType: doc.mimeType, sizeBytes: doc.sizeBytes, sha256: doc.sha256 });
+        if (!content.text.trim()) throw new AIError("AI_DOCUMENT_UNSUPPORTED", "unreadable");
+        const raw = await this.deps.provider.analyzeDocument({
+          document: { id: doc.id, fileName: doc.fileName, mimeType: doc.mimeType },
+          content,
+          userText: text || undefined,
+          project,
+          conversation: conversation.context,
+        });
+        return parseInterpretationResult(raw);
       }
+      return parseInterpretationResult(await this.deps.provider.interpret({ text, project, conversation: conversation.context }));
     } catch (error) {
-      if (error instanceof Error && error.name === "ZodError") return { blocks: aiErrorBlocks(new AIMalformedResponseError("schema", error)) };
-      return { blocks: aiErrorBlocks(error) };
+      throw toAIError(error);
     }
-    const attachment = doc ? toAttachment(doc) : undefined;
-    if (doc && extraction.documentType === "unreadable") return { blocks: [{ type: "read_error", fileName: doc.fileName }], extraction, documentId: doc.id };
-    if (doc && (extraction.documentType === "other" || extraction.intent === "unknown")) {
+  }
+
+  /** Interprets a message (and optional document) into answers or pending proposals. Never writes domain data. */
+  private async respond(ledger: Ledger, text: string, documents: DocumentRow[], conversationId: string): Promise<Reply> {
+    const today = localDate(this.deps.now(), ledger.tz);
+    const conversation = await loadConversationContext(this.db, conversationId, ledger);
+    const doc = documents[0];
+    if (doc && (doc.mimeType === "text/csv" || doc.mimeType.includes("spreadsheet"))) {
       return {
-        blocks: [{ type: "text", text: `No reconocí ${doc.fileName} como comprobante de pedido, remito ni comprobante de pago. Cuéntame qué es o escribe los datos y lo registro.` }],
-        extraction,
-        documentId: doc.id,
+        blocks: [
+          { type: "text", text: "Las planillas de cómputo se cargan desde Materiales y cómputo → Cargar cómputo. Aquí puedo leer comprobantes de pedido, remitos y comprobantes de pago (PDF o foto)." },
+          { type: "actions", actions: [{ label: "Ir a Materiales", icon: "clipboard-list", link: { to: "/materiales" } }] },
+        ],
       };
     }
+    let interpreted: AIInterpretationResult;
+    try {
+      interpreted = await this.interpret(ledger, today, text, doc, conversation);
+    } catch (error) {
+      // A document without readable text gets the "take another photo" card.
+      if (doc && isAIError(error) && error.code === "AI_DOCUMENT_UNSUPPORTED" && error.message === "unreadable") return { blocks: [{ type: "read_error", fileName: doc.fileName }], documentId: doc.id };
+      if (doc && isAIError(error) && error.code === "AI_DOCUMENT_UNSUPPORTED") {
+        return { blocks: aiErrorBlocks(new AIError("AI_DOCUMENT_UNSUPPORTED", `No puedo leer archivos ${doc.mimeType.split("/")[1]?.toUpperCase() ?? ""}.`)), documentId: doc.id };
+      }
+      return { blocks: aiErrorBlocks(error) };
+    }
+    const i = interpreted.interpretation;
+    const attachment = doc ? toAttachment(doc) : undefined;
+    if (doc) {
+      const classification = interpreted.document;
+      if (!classification || classification.type === "unknown" || i.intent === "unknown") {
+        return {
+          blocks: [{ type: "text", text: `No reconocí ${doc.fileName} como comprobante de pedido, remito ni comprobante de pago. Cuéntame qué es o escribe los datos y lo registro.` }],
+          interpretation: interpreted,
+          documentId: doc.id,
+        };
+      }
+      if (classification.confidence < 0.5 || i.confidence < 0.5) {
+        return { blocks: aiErrorBlocks(new AIError("AI_INTERPRETATION_AMBIGUOUS")), interpretation: interpreted, documentId: doc.id };
+      }
+    }
+    const options = { document: attachment, focusOrderId: conversation.focus.orderId };
     let result: ProposalResult;
-    switch (extraction.intent) {
+    switch (i.intent) {
       case "create_order":
-        result = proposeOrder(ledger, extraction, today, attachment);
+        result = proposeOrder(ledger, i, today, options);
         break;
       case "register_delivery":
       case "complete_order_delivery":
-        result = proposeDelivery(ledger, extraction, today, attachment);
+        result = proposeDelivery(ledger, i, today, options);
         break;
-      case "create_payment":
+      case "create_supplier_payment":
       case "pay_order_balance":
-      case "record_supplier_account_payment":
-        result = proposePayment(ledger, extraction, today, attachment);
+        result = proposePayment(ledger, i, today, options);
         break;
       case "allocate_payment":
-        result = proposeAllocation(ledger, extraction);
+        result = proposeAllocation(ledger, i);
         break;
-      case "ask_query":
-        return { blocks: await answerQuery(ledger, extraction, this.deps.provider, text, today), extraction };
-      default:
+      case "ask_project_question": {
+        const answer = await answerQuestion(ledger, i, { provider: this.deps.provider, conversation, question: text, today });
+        return { blocks: answer.blocks, refs: answer.refs, interpretation: interpreted };
+      }
+      case "clarification_required":
+        return { blocks: [{ type: "text", text: i.question }], interpretation: interpreted, refs: conversation.focus.orderId ? { orderIds: [conversation.focus.orderId] } : undefined };
+      case "unknown":
         return {
           blocks: [
             {
               type: "text",
-              text: extraction.note
-                ? `${extraction.note} Puedo registrar pedidos, entregas y pagos, o responder sobre saldos y pendientes.`
+              text: i.note
+                ? `${i.note} Puedo registrar pedidos, entregas y pagos, o responder sobre saldos y pendientes.`
                 : "Puedo registrar pedidos, entregas y pagos, o responder sobre saldos y pendientes. Prueba con algo como «Llegaron las 20 barras del 12» o «¿Cuánto debemos a Hierros Córdoba?».",
             },
           ],
-          extraction,
+          interpretation: interpreted,
         };
     }
-    if (extraction.note && result.proposals.length) result.blocks.splice(1, 0, { type: "note", text: extraction.note });
-    return { blocks: result.blocks, result, extraction, documentId: doc?.id };
+    if (i.note && result.proposals.length) result.blocks.splice(1, 0, { type: "note", text: i.note });
+    this.attachValidation(ledger, result);
+    return { blocks: result.blocks, result, interpretation: interpreted, refs: result.refs, documentId: doc?.id };
   }
 
-  private async persistProposals(conversationId: string, messageId: string, result: ProposalResult | undefined, extraction: Extraction | undefined, documentId?: string) {
+  /** Validates every proposal of a reply and shows the result on its card. */
+  private attachValidation(ledger: Ledger, result: ProposalResult) {
+    for (const p of result.proposals) {
+      p.interpretation = withValidation(ledger, p.interpretation);
+      for (const b of result.blocks) if (b.type === "interpretation" && b.id === p.id) b.interpretation = p.interpretation;
+    }
+  }
+
+  private async persistProposals(conversationId: string, messageId: string, reply: Reply) {
+    const result = reply.result;
     if (!result?.proposals.length) return;
     const createdAt = this.deps.now().toISOString();
+    const meta = reply.interpretation?.meta;
     await this.db.batch(
       result.proposals.map((p) =>
         this.db.insert(t.aiInterpretations).values({
@@ -298,13 +348,15 @@ export class AssistantService {
           projectId: this.deps.projectId,
           conversationId,
           messageId,
-          documentId: documentId ?? null,
-          provider: this.deps.provider.name,
-          model: this.deps.provider.model ?? null,
+          documentId: reply.documentId ?? null,
+          provider: meta?.provider ?? this.deps.provider.name,
+          model: meta?.model ?? this.deps.provider.model ?? null,
           intent: p.intent,
-          confidence: extraction ? Math.round(Math.max(0, Math.min(1, extraction.confidence)) * 100) : null,
-          providerOutput: extraction ? JSON.stringify(extraction) : null,
+          confidence: reply.interpretation ? Math.round(reply.interpretation.interpretation.confidence * 100) : null,
+          // The validated, application-owned interpretation — never a vendor response object.
+          providerOutput: reply.interpretation ? JSON.stringify({ interpretation: reply.interpretation.interpretation, document: reply.interpretation.document }) : null,
           proposal: JSON.stringify(p.interpretation),
+          ...validationColumns(p.interpretation.validation),
           status: "pending",
           createdAt,
         }),
@@ -322,10 +374,11 @@ export class AssistantService {
     const conversationId = await this.ensureConversation(actor, input.conversationId, text || documents[0]?.fileName || "Comprobante");
     const userAt = this.deps.now();
     const userMessageId = await this.appendMessage(conversationId, { role: "user", text: text || undefined, authorUserId: actor.userId, documentIds }, userAt);
-    const { blocks, result, extraction, documentId } = await this.respond(ledger, text, documents);
+    const reply = await this.respond(ledger, text, documents, conversationId);
+    const blocks = reply.blocks;
     const replyAt = new Date(Math.max(this.deps.now().getTime(), userAt.getTime() + 1));
-    const replyId = await this.appendMessage(conversationId, { role: "assistant", blocks }, replyAt);
-    await this.persistProposals(conversationId, replyId, result, extraction, documentId);
+    const replyId = await this.appendMessage(conversationId, { role: "assistant", blocks, refs: reply.refs }, replyAt);
+    await this.persistProposals(conversationId, replyId, reply);
     return {
       conversationId,
       userMessage: { id: userMessageId, role: "user", at: this.stamp(ledger, userAt), text: text || undefined, attachments: documents.map(toAttachment) },
@@ -346,9 +399,10 @@ export class AssistantService {
     const at = this.deps.now();
     const userId = await this.appendMessage(input.conversationId, { role: "user", text: input.label, authorUserId: actor.userId }, at);
     const result = resolvePaymentChoice(ledger, input.optionId, input.context, today);
+    this.attachValidation(ledger, result);
     const replyAt = new Date(at.getTime() + 1);
-    const replyId = await this.appendMessage(input.conversationId, { role: "assistant", blocks: result.blocks }, replyAt);
-    await this.persistProposals(input.conversationId, replyId, result, undefined);
+    const replyId = await this.appendMessage(input.conversationId, { role: "assistant", blocks: result.blocks, refs: { supplierIds: [input.context.supplierId] } }, replyAt);
+    await this.persistProposals(input.conversationId, replyId, { blocks: result.blocks, result });
     return {
       messages: [
         { id: userId, role: "user", at: this.stamp(ledger, at), text: input.label },
@@ -369,8 +423,12 @@ export class AssistantService {
     const row = await this.pendingRow(id);
     const original = JSON.parse(row.proposal) as Interpretation;
     if (original.kind !== interpretation.kind) throw new DomainError("validation", "La propuesta cambió de tipo.");
-    const revised = reviseInterpretation(await this.ledger(), interpretation);
-    await this.db.update(t.aiInterpretations).set({ proposal: JSON.stringify(revised) }).where(eq(t.aiInterpretations.id, id));
+    const ledger = await this.ledger();
+    const revised = withValidation(ledger, reviseInterpretation(ledger, interpretation));
+    await this.db
+      .update(t.aiInterpretations)
+      .set({ proposal: JSON.stringify(revised), ...validationColumns(revised.validation) })
+      .where(eq(t.aiInterpretations.id, id));
     return revised;
   }
 
@@ -384,8 +442,20 @@ export class AssistantService {
       const [doc] = await this.db.select().from(t.documents).where(eq(t.documents.id, interpretation.document.documentId));
       if (!doc || doc.projectId !== this.deps.projectId) throw new DomainError("not_found", "El documento adjunto no existe.");
     }
+    // Revalidate against current data: recompute every derived value and refuse stale or blocked proposals.
     const ledger = await this.ledger();
-    const final = reviseInterpretation(ledger, interpretation);
+    const final = withValidation(ledger, reviseInterpretation(ledger, interpretation));
+    const stale = staleProposal(ledger, interpretation, final);
+    if (stale) {
+      const refreshed = withValidation(ledger, stale.interpretation);
+      await this.db
+        .update(t.aiInterpretations)
+        .set({ proposal: JSON.stringify(refreshed), ...validationColumns(refreshed.validation) })
+        .where(eq(t.aiInterpretations.id, id));
+      throw new DomainError("stale_proposal", stale.message, refreshed);
+    }
+    const blocking = final.validation?.issues.filter((x) => x.severity === "error") ?? [];
+    if (blocking.length) throw new DomainError("validation", `No se puede confirmar todavía: ${blocking.map((x) => x.message).join(" ")}`);
     const ctx = this.commandContext(actor, "assistant", id);
     const outcome = await confirmInterpretation(ctx, ledger, final, () => this.ledger());
     const resolvedAt = this.deps.now();
@@ -394,6 +464,7 @@ export class AssistantService {
       .set({
         status: "confirmed",
         confirmedProposal: JSON.stringify(final),
+        ...validationColumns(final.validation),
         result: JSON.stringify(outcome.result),
         resultEntityType: outcome.entityType,
         resultEntityId: outcome.entityId,
@@ -412,7 +483,7 @@ export class AssistantService {
         { type: "text", text: FOLLOW_UP[final.kind] },
       ];
       const replyAt = new Date(userAt.getTime() + 1);
-      const replyId = await this.appendMessage(row.conversationId, { role: "assistant", blocks }, replyAt);
+      const replyId = await this.appendMessage(row.conversationId, { role: "assistant", blocks, refs: refsOfOutcome(final, outcome.entityType, outcome.entityId) }, replyAt);
       messages.push({ id: userId, role: "user", at: this.stamp(fresh, userAt), text: userText }, { id: replyId, role: "assistant", at: this.stamp(fresh, replyAt), blocks });
     }
     return { result: outcome.result, messages };
@@ -445,4 +516,12 @@ export class AssistantService {
     }
     return { messages };
   }
+}
+
+/** What a confirmation reply is about, so "¿y cuánto falta pagar?" works right after confirming. */
+function refsOfOutcome(i: Interpretation, entityType: string, entityId: string): Partial<ContextRefs> {
+  if (entityType === "order") return { orderIds: [entityId], supplierIds: i.kind === "order" && i.supplierId ? [i.supplierId] : [] };
+  if (i.kind === "delivery") return { orderIds: [i.orderId], supplierIds: i.supplierId ? [i.supplierId] : [] };
+  if (i.kind === "payment") return { orderIds: i.allocation.type === "order" ? [i.allocation.orderId] : [], supplierIds: [i.supplierId] };
+  return {};
 }

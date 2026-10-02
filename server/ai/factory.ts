@@ -1,29 +1,47 @@
-import { AnthropicAIProvider } from "./anthropic";
+import { CloudflareAIProvider, CloudflareDocumentContentExtractor } from "./cloudflare";
 import { DisabledAIProvider } from "./disabled";
+import { DisabledDocumentContentExtractor, LocalDocumentContentExtractor, type DocumentBytesSource, type DocumentContentExtractor } from "./document-content";
 import { MockAIProvider } from "./mock";
-import type { AIProvider } from "./provider";
+import type { AIProvider, AIProviderId } from "./provider";
 
-export type AIProviderSetting = "auto" | "mock" | "anthropic" | "disabled";
+// The single configuration boundary for AI. Entry points (Node server,
+// Worker, tests) build an `AIConfig` from their environment and get back the
+// provider and the document extractor; nothing else switches on providers.
 
-export interface ProviderConfig {
-  aiProvider: AIProviderSetting;
-  anthropicApiKey?: string;
-  aiModel: string;
-  aiEffort: "low" | "medium" | "high" | "xhigh" | "max";
+export interface AIConfig {
+  provider: AIProviderId;
+  /** Optional model id for providers that use one (AI_MODEL). */
+  model?: string;
+  /** Cloudflare Workers AI binding (`env.AI`), when running on Workers. */
+  cloudflareBinding?: unknown;
 }
 
-export function parseProviderSetting(value: string | undefined, fallback: AIProviderSetting): AIProviderSetting {
-  const v = (value ?? "").toLowerCase();
-  return v === "auto" || v === "mock" || v === "anthropic" || v === "disabled" ? v : fallback;
+const IDS: AIProviderId[] = ["mock", "cloudflare", "disabled"];
+
+/** Reads AI_PROVIDER; unknown values fall back (and old values such as "auto" mean the fallback). */
+export function parseAIProviderId(value: string | undefined, fallback: AIProviderId): AIProviderId {
+  const v = (value ?? "").trim().toLowerCase() as AIProviderId;
+  return IDS.includes(v) ? v : fallback;
 }
 
-/** `auto` uses Anthropic when an API key is configured and the deterministic mock otherwise. */
-export function createProvider(config: ProviderConfig): AIProvider {
-  if (config.aiProvider === "disabled") return new DisabledAIProvider();
-  if (config.aiProvider === "mock") return new MockAIProvider();
-  if (config.aiProvider === "anthropic" || config.anthropicApiKey) {
-    if (!config.anthropicApiKey) throw new Error("AI_PROVIDER=anthropic requiere ANTHROPIC_API_KEY");
-    return new AnthropicAIProvider({ apiKey: config.anthropicApiKey, model: config.aiModel, effort: config.aiEffort });
+export function getAIProvider(config: AIConfig): AIProvider {
+  switch (config.provider) {
+    case "mock":
+      return new MockAIProvider();
+    case "cloudflare":
+      return new CloudflareAIProvider({ binding: config.cloudflareBinding, model: config.model });
+    case "disabled":
+      return new DisabledAIProvider();
   }
-  return new MockAIProvider();
+}
+
+export function getDocumentContentExtractor(config: AIConfig, bytes: DocumentBytesSource): DocumentContentExtractor {
+  switch (config.provider) {
+    case "mock":
+      return new LocalDocumentContentExtractor(bytes);
+    case "cloudflare":
+      return new CloudflareDocumentContentExtractor(bytes, { binding: config.cloudflareBinding });
+    case "disabled":
+      return new DisabledDocumentContentExtractor();
+  }
 }

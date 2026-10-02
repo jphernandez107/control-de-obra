@@ -9,7 +9,7 @@ import { DeliveryCard } from "./cards/DeliveryCard";
 import { OrderCard } from "./cards/OrderCard";
 import { PaymentCard } from "./cards/PaymentCard";
 import { ConfirmedCard, ResolvedRow, SavedRecord } from "./cards/ResultCards";
-import { ActionChips, AnalysisCard, BalanceBlock, ChoiceBlock, PendingDeliveriesBlock, QuantitiesBlock, ReadErrorCard } from "./cards/AnswerBlocks";
+import { ActionChips, AiErrorCard, AnalysisCard, BalanceBlock, ChoiceBlock, PendingDeliveriesBlock, QuantitiesBlock, ReadErrorCard } from "./cards/AnswerBlocks";
 
 export interface ThreadActions {
   onPrompt: (text: string) => void;
@@ -23,7 +23,7 @@ function interpretationLabel(i: Interpretation): string {
   return `Pago de ${i.supplierName}`;
 }
 
-const WIDE: AssistantBlock["type"][] = ["interpretation", "analysis", "read_error"];
+const WIDE: AssistantBlock["type"][] = ["interpretation", "analysis", "read_error", "ai_error"];
 
 function AiAvatar({ size = 28 }: { size?: 24 | 28 }) {
   return (
@@ -110,6 +110,8 @@ function BlockView({ block, actions }: { block: AssistantBlock; actions: ThreadA
       );
     case "read_error":
       return <ReadErrorCard onRetake={actions.onRetakePhoto} onManual={actions.onManualEntry} onRetry={actions.onRetakePhoto} />;
+    case "ai_error":
+      return <AiErrorCard message={block.message} hint={block.hint} />;
     case "balance":
       return <BalanceBlock {...block} />;
     case "quantities":

@@ -4,10 +4,13 @@
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
-  constructor(status: number, code: string, message: string) {
+  /** Extra error data; e.g. the refreshed proposal of a `stale_proposal` error. */
+  readonly payload?: Record<string, unknown>;
+  constructor(status: number, code: string, message: string, payload?: Record<string, unknown>) {
     super(message);
     this.status = status;
     this.code = code;
+    this.payload = payload;
     // Pages check `error.name === "NotFoundError"` to show their empty state.
     this.name = status === 404 ? "NotFoundError" : "ApiError";
   }
@@ -35,8 +38,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     json = undefined;
   }
   if (!res.ok) {
-    const err = (json as { error?: { code?: string; message?: string } } | undefined)?.error;
-    throw new ApiError(res.status, err?.code ?? "http_error", err?.message ?? `El servidor respondió con un error (${res.status}).`);
+    const err = (json as { error?: { code?: string; message?: string } & Record<string, unknown> } | undefined)?.error;
+    throw new ApiError(res.status, err?.code ?? "http_error", err?.message ?? `El servidor respondió con un error (${res.status}).`, err);
   }
   return json as T;
 }

@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AssistantBlock, AssistantInput, Attachment, ChatMessage, Interpretation } from "@/domain/assistant";
 import { useServices } from "@/services";
-import { errorMessage } from "@/services/api/client";
+import { ApiError, errorMessage } from "@/services/api/client";
 import { useInvalidateAll } from "@/queries";
 import { useToast } from "@/components/ui/Toast";
 
@@ -59,6 +59,8 @@ function findInterpretation(messages: ChatMessage[], blockId: string): Interpret
 
 /** Edits that change which records a proposal points at; the server re-resolves them. */
 function needsRevision(before: Interpretation, after: Interpretation): boolean {
+  // A blocked proposal is re-validated on every edit so the card shows when it can be confirmed.
+  if (before.validation?.state === "blocked") return true;
   if (before.kind === "order" && after.kind === "order") {
     return before.supplierName !== after.supplierName || before.items.length !== after.items.length || before.items.some((it, i) => it.material !== after.items[i]?.material || it.materialId !== after.items[i]?.materialId);
   }
@@ -190,7 +192,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         append(...appended);
         invalidate();
       } catch (error) {
-        setBlock(blockId, { state: "pending" });
+        // Data changed since the proposal: show the refreshed one for a new review.
+        const refreshed = error instanceof ApiError && error.code === "stale_proposal" ? (error.payload?.interpretation as Interpretation | undefined) : undefined;
+        setBlock(blockId, refreshed ? { state: "pending", interpretation: refreshed } : { state: "pending" });
         toast(errorMessage(error, "No se pudo guardar. Intenta de nuevo."), "info");
       }
     },

@@ -1,56 +1,68 @@
-import type { AIAnswer, Extraction } from "./schemas";
+import type { ExtractedDocumentContent } from "./document-content";
+import type { ProjectQueryResult } from "./project-queries";
+import type { AIAnswerResult, AIInterpretationResult } from "./schemas";
 
-// Provider-independent AI boundary. Domain code depends only on this
-// interface; Anthropic, a deterministic mock, or Cloudflare Workers AI can
-// implement it.
+// Provider-independent AI boundary. Domain, proposal and UI code depend only
+// on these application-owned types; a provider adapter (the deterministic
+// mock today, Cloudflare Workers AI later) translates them to and from its
+// own API and maps its failures to `AIError` codes (see ./errors.ts).
 
-/** Compact, verified project facts given to the provider so it can recognize names. */
-export interface AIContext {
+export type AIProviderId = "mock" | "cloudflare" | "disabled";
+
+/** Compact, verified project facts so the provider can recognize names. Never balances. */
+export interface AIProjectContext {
   today: string;
   suppliers: string[];
   materials: { name: string; unit: string; aliases: string[] }[];
   openOrders: { reference: string; supplier: string; items: string }[];
 }
 
-export interface AIInput {
+/**
+ * Short, relevant slice of the conversation (see ./conversation-context.ts).
+ * `focus` names what the last exchange was about, so "¿y cuánto falta pagar?"
+ * can be understood; figures always come from the database, not from here.
+ */
+export interface AIConversationContext {
+  recent: { role: "user" | "assistant"; text: string }[];
+  focus: {
+    order?: { reference: string; supplier: string };
+    supplier?: string;
+    material?: string;
+  };
+}
+
+export interface AIInterpretationInput {
   text: string;
-  context: AIContext;
+  project: AIProjectContext;
+  conversation: AIConversationContext;
 }
 
-export interface DocumentInput {
-  fileName: string;
-  mimeType: string;
-  data: Uint8Array;
+export interface AIDocumentInput {
+  document: { id: string; fileName: string; mimeType: string };
+  /** Normalized content from a DocumentContentExtractor; providers never see storage. */
+  content: ExtractedDocumentContent;
   /** What the user wrote next to the attachment, if anything. */
-  text?: string;
-  context: AIContext;
+  userText?: string;
+  project: AIProjectContext;
+  conversation: AIConversationContext;
 }
 
-export interface AIQuestionContext {
+export interface AIQuestionInput {
   question: string;
   today: string;
-  /** Verified figures computed by the application; the provider must not invent others. */
-  facts: string;
+  /** Results of read-only project queries. The answer must use only these figures. */
+  results: ProjectQueryResult[];
+  conversation: AIConversationContext;
 }
 
 export interface AIProvider {
+  readonly id: AIProviderId;
+  /** Human label stored with each pending action. */
   readonly name: string;
   readonly model?: string;
-  interpret(input: AIInput): Promise<Extraction>;
-  analyzeDocument(input: DocumentInput): Promise<Extraction>;
-  answer(input: AIQuestionContext): Promise<AIAnswer>;
-}
-
-export class AIUnavailableError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
-    super(message);
-    this.name = "AIUnavailableError";
-  }
-}
-
-export class AIMalformedResponseError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
-    super(message);
-    this.name = "AIMalformedResponseError";
-  }
+  /** Whether the provider can serve requests (false → the UI explains that AI is not configured). */
+  readonly configured: boolean;
+  interpret(input: AIInterpretationInput): Promise<AIInterpretationResult>;
+  analyzeDocument(input: AIDocumentInput): Promise<AIInterpretationResult>;
+  answer(input: AIQuestionInput): Promise<AIAnswerResult>;
 }

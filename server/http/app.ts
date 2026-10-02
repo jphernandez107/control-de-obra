@@ -3,6 +3,10 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { AppDb } from "../db/client";
 import type { AIProvider } from "../ai/provider";
+import { LocalDocumentContentExtractor, type DocumentBytesSource, type DocumentContentExtractor } from "../ai/document-content";
+import { listPendingActions } from "../ai/pending-actions";
+import { runProjectQuery } from "../ai/project-queries";
+import { PROJECT_QUERY_NAMES, type ProjectQueryName } from "../ai/schemas";
 import { DomainError } from "../domain/errors";
 import { toMilli } from "../domain/quantity";
 import type { DocumentStorage } from "../storage/storage";
@@ -22,6 +26,8 @@ export interface AppDeps {
   db: AppDb;
   storage: DocumentStorage;
   ai: AIProvider;
+  /** Builds the document → text extractor from a byte source (default: local PDF text). */
+  documentExtractor?: (bytes: DocumentBytesSource) => DocumentContentExtractor;
   projectId: string;
   auth: AuthConfig;
   documentLimits?: DocumentLimits;
@@ -122,13 +128,20 @@ async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer
 export function createApp(deps: AppDeps) {
   const now = deps.now ?? (() => new Date());
   const qctx = { db: deps.db, projectId: deps.projectId, now };
-  const assistant = new AssistantService({ db: deps.db, projectId: deps.projectId, provider: deps.ai, storage: deps.storage, now });
+  // Document bytes are resolved here (storage + metadata); extractors only see this function.
+  const documentBytes: DocumentBytesSource = async (doc) => readDocumentBytes(deps.storage, await getDocument(deps.db, deps.projectId, doc.id));
+  const extractor = (deps.documentExtractor ?? ((bytes) => new LocalDocumentContentExtractor(bytes)))(documentBytes);
+  const assistant = new AssistantService({ db: deps.db, projectId: deps.projectId, provider: deps.ai, extractor, storage: deps.storage, now });
   const cmd = (c: Context<Env>, source: CommandContext["source"] = "manual"): CommandContext => ({ db: deps.db, projectId: deps.projectId, actor: c.get("actor"), source, now });
 
   const app = new Hono<Env>().basePath("/api");
 
   app.onError((err, c) => {
-    if (err instanceof DomainError) return c.json({ error: { code: err.code, message: err.message } }, err.status as 400);
+    if (err instanceof DomainError) {
+      // A stale AI proposal comes back refreshed so the card can be reviewed again.
+      const extra = err.code === "stale_proposal" ? { interpretation: err.details } : {};
+      return c.json({ error: { code: err.code, message: err.message, ...extra } }, err.status as 400);
+    }
     console.error(err);
     return c.json({ error: { code: "internal", message: "Ocurrió un error inesperado. No se guardó nada; intenta de nuevo." } }, 500);
   });
@@ -147,7 +160,15 @@ export function createApp(deps: AppDeps) {
   // ---------------------------------------------------------------- session
   app.get("/session", async (c) => {
     const actor = c.get("actor");
-    return c.json({ today: await queries.projectToday(qctx), user: actor, ai: { provider: deps.ai.name, model: deps.ai.model ?? null } });
+    return c.json({ today: await queries.projectToday(qctx), user: actor, ai: { provider: deps.ai.id, configured: deps.ai.configured, model: deps.ai.model ?? null } });
+  });
+
+  // ---------------------------------------------------------------- read-only project queries (no SQL surface)
+  app.get("/queries/:name", async (c) => {
+    const name = c.req.param("name") as ProjectQueryName;
+    if (!PROJECT_QUERY_NAMES.includes(name)) throw new DomainError("not_found", "Consulta inexistente.");
+    const q = c.req.query();
+    return c.json(runProjectQuery(await queries.ledgerFor(qctx), name, { supplier: q.supplier, order: q.order, material: q.material }));
   });
 
   // ---------------------------------------------------------------- read models
@@ -313,6 +334,10 @@ export function createApp(deps: AppDeps) {
   // ---------------------------------------------------------------- assistant
   app.get("/assistant/thread", async (c) => c.json(await assistant.thread(c.req.query("conversationId") || undefined)));
   app.get("/assistant/conversations", async (c) => c.json(await assistant.conversations()));
+  app.get("/assistant/pending-actions", async (c) => {
+    const status = c.req.query("status");
+    return c.json(await listPendingActions(deps.db, deps.projectId, status === "confirmed" || status === "cancelled" || status === "undone" ? status : "pending"));
+  });
   app.post("/assistant/conversations", async (c) => c.json(await assistant.newConversation(c.get("actor")), 201));
   app.post("/assistant/messages", async (c) => {
     const b = await body(c, z.object({ conversationId: z.string().nullable().optional(), text: z.string().max(4000).optional(), documentIds: z.array(z.string()).max(5).optional() }));

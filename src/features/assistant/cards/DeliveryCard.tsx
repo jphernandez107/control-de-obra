@@ -51,6 +51,7 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
       badge
       actions={
         <CardActions
+          validation={i.validation}
           confirmLabel="Confirmar"
           onConfirm={() => {
             setEditingAll(false);
