@@ -3,6 +3,7 @@ import type { AssistantBlock, Attachment, ChatMessage, ConfirmResponse, ConfirmR
 import type { AppDb } from "../db/client";
 import * as t from "../db/schema";
 import { answerQuery } from "../ai/answers";
+import { AINotConfiguredError } from "../ai/disabled";
 import { AIMalformedResponseError, AIUnavailableError, type AIContext, type AIProvider } from "../ai/provider";
 import { proposeAllocation, proposeDelivery, proposeOrder, proposePayment, resolvePaymentChoice, type ProposalResult } from "../ai/proposals";
 import { confirmInterpretation, reviseInterpretation } from "../ai/review";
@@ -57,6 +58,12 @@ export function toAttachment(doc: DocumentRow): Attachment {
 }
 
 function aiErrorBlocks(error: unknown): AssistantBlock[] {
+  if (error instanceof AINotConfiguredError) {
+    return [
+      { type: "text", text: `${error.message} No se guardó nada.` },
+      { type: "note", text: "Mientras tanto puedes registrar entregas y pagos desde Pedidos o Proveedores, y consultar saldos en Proveedores." },
+    ];
+  }
   if (error instanceof AIUnavailableError) {
     return [
       { type: "text", text: `El asistente de IA no está disponible en este momento: ${error.message} No se guardó nada.` },

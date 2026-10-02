@@ -1,3 +1,4 @@
+import { parseProviderSetting, type AIProviderSetting } from "./ai/factory";
 import type { AuthMode } from "./http/auth";
 
 // Environment configuration for the local Node server. A Workers entry would
@@ -7,7 +8,7 @@ export interface ServerConfig {
   databaseUrl: string;
   documentsDir: string;
   port: number;
-  aiProvider: "auto" | "mock" | "anthropic";
+  aiProvider: AIProviderSetting;
   anthropicApiKey?: string;
   aiModel: string;
   aiEffort: "low" | "medium" | "high" | "xhigh" | "max";
@@ -17,13 +18,12 @@ export interface ServerConfig {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
-  const provider = (env.AI_PROVIDER ?? "auto").toLowerCase();
   const effort = (env.AI_EFFORT ?? "low").toLowerCase();
   return {
     databaseUrl: env.DATABASE_URL ?? "file:./data/casa-cordoba.db",
     documentsDir: env.DOCUMENTS_DIR ?? "./data/documents",
     port: Number(env.API_PORT ?? env.PORT ?? 8787),
-    aiProvider: provider === "mock" || provider === "anthropic" ? provider : "auto",
+    aiProvider: parseProviderSetting(env.AI_PROVIDER, "auto"),
     anthropicApiKey: env.ANTHROPIC_API_KEY || undefined,
     aiModel: env.AI_MODEL || "claude-opus-5-5",
     aiEffort: (["low", "medium", "high", "xhigh", "max"].includes(effort) ? effort : "low") as ServerConfig["aiEffort"],
