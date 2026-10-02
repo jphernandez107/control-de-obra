@@ -1,5 +1,6 @@
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AppDb } from "./db/client";
 import * as t from "./db/schema";
 import { CONVERSIONS, MATERIALS, SUPPLIERS, UNITS } from "./dev/catalog";
@@ -342,7 +343,7 @@ async function firstItem(db: AppDb, orderId: string, position: number): Promise<
 }
 
 // ---------------------------------------------------------------- CLI
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const { loadConfig } = await import("./config");
   const { migrateDatabase, openDatabase } = await import("./db/node");
   const { LocalFileStorage } = await import("./storage/local");
