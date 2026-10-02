@@ -4,7 +4,9 @@ import { Ledger } from "../domain/derive";
 import { assert, DomainError } from "../domain/errors";
 import { lineTotalMinor } from "../domain/money";
 import { fromMilli } from "../domain/quantity";
+import { canonicalMaterialName } from "../domain/matching";
 import { normalizeReference, normalizeText } from "../domain/text";
+import type { UnitSize } from "../domain/units";
 import { isValidDate } from "../domain/time";
 import { formatMoney, formatNumber, paymentMethodLabel } from "../../src/domain/format";
 import type { ActivityChange, PaymentMethod, StatusTag } from "../../src/domain/types";
@@ -40,7 +42,7 @@ function qtyLabel(ledger: Ledger, milli: number, unit: string) {
 // ------------------------------------------------------------------ catalog
 
 export type SupplierRefInput = { id: string } | { newName: string; category?: string };
-export type MaterialRefInput = { id: string } | { newName: string; unit: string; category?: string; spec?: string };
+export type MaterialRefInput = { id: string } | { newName: string; unit: string; category?: string; spec?: string; shortName?: string };
 
 /** Existing supplier or a new one. A new name equal (normalized) to an existing supplier reuses it. */
 function resolveSupplier(ws: WriteSet, ctx: CommandContext, ledger: Ledger, ref: SupplierRefInput, created: Map<string, string>): string {
@@ -82,12 +84,15 @@ function resolveMaterial(ws: WriteSet, ctx: CommandContext, ledger: Ledger, ref:
   assert(name.length >= 2, "material_unresolved", "Falta el nombre del material.");
   checkUnit(ledger, ref.unit);
   const normalized = normalizeText(name);
-  const existing = ledger.s.materials.find((m) => m.normalizedName === normalized);
+  // "Hierro del 12" and "Acero Ø12" are the same catalog material: compare canonical names too.
+  const canonical = canonicalMaterialName(name);
+  const canonicalKey = normalizeText(canonical.name);
+  const existing = ledger.s.materials.find((m) => m.normalizedName === normalized || normalizeText(canonicalMaterialName(m.name).name) === canonicalKey);
   if (existing) return existing.id;
-  const pending = created.get(`m:${normalized}`);
+  const pending = created.get(`m:${canonicalKey}`);
   if (pending) return pending;
   const id = newId();
-  created.set(`m:${normalized}`, id);
+  created.set(`m:${canonicalKey}`, id);
   const supplier = ledger.supplier(supplierId);
   ws.add(
     ctx.db.insert(t.materials).values({
@@ -95,10 +100,10 @@ function resolveMaterial(ws: WriteSet, ctx: CommandContext, ledger: Ledger, ref:
       projectId: ctx.projectId,
       name,
       normalizedName: normalized,
-      shortName: name,
+      shortName: ref.shortName ?? (canonical.name === name ? canonical.shortName : name),
       spec: ref.spec ?? null,
       baseUnit: ref.unit,
-      category: ref.category ?? supplier?.category ?? "Varios",
+      category: ref.category ?? canonical.category ?? supplier?.category ?? "Varios",
       usualSupplierId: ledger.supplier(supplierId) ? supplierId : null,
       active: true,
       createdAt: ws.stamp,
@@ -109,12 +114,16 @@ function resolveMaterial(ws: WriteSet, ctx: CommandContext, ledger: Ledger, ref:
   return id;
 }
 
-/** Remembers a confirmed wording ("hierro del 12") for a material, so the next match is strong. */
-function learnAlias(ws: WriteSet, ctx: CommandContext, ledger: Ledger, materialId: string, alias: string | undefined, learned: Set<string>) {
-  if (!alias || !ledger.material(materialId)) return;
+/**
+ * Remembers a confirmed wording ("hierro del 12", "HIERRO DIAM.12 X BARRA 12 MT")
+ * for a material, so the next match is strong. `newName` is given for a
+ * material created in the same batch.
+ */
+function learnAlias(ws: WriteSet, ctx: CommandContext, ledger: Ledger, materialId: string, alias: string | undefined, learned: Set<string>, newName?: string) {
+  const material = ledger.material(materialId) ?? (newName ? { name: newName, normalizedName: normalizeText(newName) } : undefined);
+  if (!alias || !material) return;
   const normalized = normalizeText(alias);
-  if (normalized.length < 2 || learned.has(normalized)) return;
-  const material = ledger.material(materialId)!;
+  if (normalized.length < 2 || normalized.length > 120 || learned.has(normalized)) return;
   if (material.normalizedName === normalized) return;
   if (ledger.s.aliases.some((a) => a.normalizedAlias === normalized)) return;
   learned.add(normalized);
@@ -130,6 +139,28 @@ function learnAlias(ws: WriteSet, ctx: CommandContext, ledger: Ledger, materialI
     }),
   );
   ws.audit({ action: "material.alias_added", entityType: "material", entityId: materialId, summary: `«${alias.trim()}» → ${material.name}` });
+}
+
+/** Adds the catalog conversion "1 barra = 12 m" for a material when it has none between those units. */
+function learnConversion(ws: WriteSet, ctx: CommandContext, ledger: Ledger, materialId: string, from: string, size: UnitSize, learned: Set<string>) {
+  const key = `${materialId}:${from}:${size.unit}`;
+  if (learned.has(key) || from === size.unit) return;
+  if (ledger.material(materialId) && ledger.convertForMaterial(materialId, 1000, from, size.unit) !== null) return;
+  learned.add(key);
+  const d = gcd(size.milli, 1000);
+  ws.add(ctx.db.insert(t.unitConversions).values({ id: newId(), materialId, fromUnit: from, toUnit: size.unit, factorNum: size.milli / d, factorDen: 1000 / d }));
+}
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+function checkUnitSize(ledger: Ledger, size: UnitSize | null | undefined, unit: string, label: string): UnitSize | null {
+  if (!size) return null;
+  assert(Number.isSafeInteger(size.milli) && size.milli > 0, "invalid_quantity", `La medida de cada ${ledger.unitInfo(unit)?.singular ?? unit} de ${label} no es válida.`);
+  checkUnit(ledger, size.unit);
+  assert(size.unit !== unit, "validation", `La medida de ${label} debe estar en otra unidad que la de compra.`);
+  return size;
 }
 
 // ------------------------------------------------------------------ documents
@@ -227,8 +258,11 @@ export interface CreateOrderInput {
     /** Wording to remember as an alias of the chosen material. */
     mention?: string;
     description?: string;
+    /** Purchase quantity, in `unit` (172 barras). */
     quantityMilli: number;
     unit: string;
+    /** Size of one purchase unit when the document states it (12 m per barra). */
+    unitSize?: UnitSize | null;
     unitPriceMinor?: number | null;
   }[];
   documentIds?: string[];
@@ -242,6 +276,7 @@ export async function createOrder(ctx: CommandContext, input: CreateOrderInput):
   const ws = new WriteSet(ctx);
   const created = new Map<string, string>();
   const learned = new Set<string>();
+  const learnedConversions = new Set<string>();
   const supplierId = resolveSupplier(ws, ctx, ledger, input.supplier, created);
   const reference = input.reference?.trim() || null;
   if (reference) {
@@ -286,6 +321,7 @@ export async function createOrder(ctx: CommandContext, input: CreateOrderInput):
     const materialName = ledger.material(materialId)?.name ?? ("newName" in item.material ? item.material.newName : "Material");
     checkQuantity(item.quantityMilli, materialName);
     checkUnit(ledger, item.unit);
+    const unitSize = checkUnitSize(ledger, item.unitSize, item.unit, materialName);
     const price = item.unitPriceMinor ?? null;
     assert(price === null || (Number.isSafeInteger(price) && price >= 0), "invalid_amount", `El precio de ${materialName} no es válido.`);
     const lineTotal = price === null ? null : lineTotalMinor(price, item.quantityMilli);
@@ -298,12 +334,15 @@ export async function createOrder(ctx: CommandContext, input: CreateOrderInput):
         description: item.description?.trim() || materialName,
         quantityMilli: item.quantityMilli,
         unit: item.unit,
+        unitSizeMilli: unitSize?.milli ?? null,
+        unitSizeUnit: unitSize?.unit ?? null,
         unitPriceMinor: price,
         lineTotalMinor: lineTotal,
         position,
       }),
     );
-    if ("id" in item.material) learnAlias(ws, ctx, ledger, materialId, item.mention, learned);
+    learnAlias(ws, ctx, ledger, materialId, item.mention, learned, "newName" in item.material ? item.material.newName.trim() : undefined);
+    if (unitSize) learnConversion(ws, ctx, ledger, materialId, item.unit, unitSize, learnedConversions);
   });
   const value = input.statedTotalMinor ?? total;
   const number = reference ?? `#${internalNumber}`;

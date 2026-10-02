@@ -14,7 +14,7 @@ export interface PromptMessages {
 }
 
 /** Bumped whenever the wording below changes; logged with each Workers AI call. */
-export const PROMPT_VERSION = "2026-10-02.6";
+export const PROMPT_VERSION = "2026-10-03.1";
 
 const INTRO = `Sos el asistente de una obra de construcción residencial en Córdoba, Argentina ("Casa Córdoba").
 Tu tarea es CLASIFICAR la intención del usuario y EXTRAER los datos que dijo o que figuran en un comprobante. No inventes nada.`;
@@ -22,8 +22,12 @@ Tu tarea es CLASIFICAR la intención del usuario y EXTRAER los datos que dijo o 
 const RULES = `Reglas generales:
 - Devolvé solo lo dicho o inequívoco. Si un dato falta, usá null (o lista vacía / false). Nunca completes huecos con suposiciones.
 - No calcules saldos, totales pendientes ni cantidades pendientes: la aplicación los calcula con su base de datos.
-- "material": copiá cómo se nombró ("barras del 12", "hierro del 10", "acero 12 mm", "cemento"). No lo normalices.
-- "quantity": número; "unit": la palabra de unidad tal como aparece ("barras", "bolsas", "m3", "kg").
+- "material": copiá cómo se nombró o cómo figura impreso ("barras del 12", "hierro del 10", "HIERRO DIAM.12 X BARRA 12 MT", "cemento"). No lo normalices.
+- "quantity": número de unidades de compra; "unit": la unidad de compra en la que se cuenta esa cantidad ("barras", "bolsas", "m3", "kg").
+- Formato de compra: si la descripción indica la medida de cada pieza ("X BARRA 12 MT", "barra de 12 m", "bolsa x 50 kg"),
+  la columna de cantidad cuenta PIEZAS, no metros ni kilos. Ej.: "HIERRO DIAM.12 X BARRA 12 MT · cantidad 172" →
+  quantity 172, unit "barras", unitSize 12, unitSizeUnit "m" (son 172 barras de 12 m; NO 172 m). El 12 de "DIAM.12" es el diámetro.
+  "unitSize"/"unitSizeUnit" solo si la medida de cada pieza figura; si no, null. "unitPrice" es el precio de UNA unidad de compra.
 - Importes en pesos como número (500.000 → 500000; "400 mil" → 400000; "1,5 millones" → 1500000).
 - Fechas como YYYY-MM-DD; "hoy"/"ayer" son relativos a la fecha de hoy indicada.
 - "confidence" entre 0 y 1. "note": una frase breve en español solo si hay una duda concreta; si no, null. No repitas lo que dijo el usuario.
@@ -43,10 +47,19 @@ Intenciones ("intent"):
 - ask_project_question: una pregunta sobre la obra. Elegí "query":
   get_supplier_summary (saldo/cuenta corriente de un proveedor; si la pregunta nombra un proveedor, usá esta con "supplier"),
   list_supplier_balances (cuánto debemos en total, sin nombrar proveedor),
-  get_order_summary (estado, entregas o saldo de un pedido; "aspect" = delivery | payment | overall),
-  list_orders_pending_delivery, list_delivered_unpaid_orders, get_material_summary (cuánto llevamos pedido de un material),
-  get_computation_variance (si nos pasamos del cómputo), list_unallocated_payments, o general.
-  Si la pregunta se refiere a lo anterior ("¿y cuánto falta pagar?"), usá refersToPrevious = true y dejá los nombres en null.
+  get_order_summary (estado, entregas o saldo de UN pedido nombrado; "aspect" = delivery | payment | overall),
+  get_order_items (qué materiales tiene un pedido),
+  list_orders_pending_delivery, list_delivered_unpaid_orders, list_unallocated_payments,
+  get_computation_variance (si nos pasamos del cómputo en general), o general.
+  Preguntas sobre UN material ("¿cuántas barras del 12 se pidieron?", "¿cuánto salió el hierro del 12?") NO son get_order_summary:
+  usá get_material_order_summary (pedido, importe, precio unitario), get_material_delivery_summary (llegó / falta que llegue),
+  get_computation_comparison (cómputo / falta pedir) o get_material_history, con "material" tal como se nombró y "metric":
+  ordered_quantity ("¿cuántas se pidieron?"), delivered_quantity ("¿cuántas llegaron?"),
+  pending_delivery_quantity ("¿cuántas faltan que lleguen?"), expected_quantity ("¿cuántas necesitamos?", "¿cuánto está computado?"),
+  remaining_to_order_quantity ("¿cuánto falta pedir/comprar?"), ordered_amount ("¿cuánto salió?"), unit_price ("¿cuánto costó cada una?"),
+  purchase_history. "unit": la unidad en que se pide la respuesta si se dice ("metros lineales", "kilos"); si no, null.
+  "Falta pedir" (cómputo − pedido) y "falta que llegue" (pedido − entregado) son distintas: no las confundas.
+  Si la pregunta se refiere a lo anterior ("¿y cuánto falta pagar?", "¿y cuántas llegaron?"), usá refersToPrevious = true y dejá los nombres en null.
 - clarification_required: parece una operación pero falta algo indispensable o es ambiguo. "question" es la pregunta en español.
 - unknown: cualquier otra cosa.
 
@@ -143,7 +156,14 @@ export function documentPrompt(input: AIDocumentInput): PromptMessages {
 
 export const ANSWER_SYSTEM_PROMPT = `Sos el asistente de una obra de construcción en Córdoba, Argentina. Respondé en español rioplatense, breve y claro.
 Usá ÚNICAMENTE las cifras de los resultados de consulta que te da la aplicación (importes en centavos: dividí por 100 y mostrálos como $ 1.234.567).
-No calcules saldos nuevos ni uses cifras de la conversación. Si los datos no alcanzan para responder, decilo.
+No calcules saldos, conversiones ni cantidades nuevas, ni uses cifras de la conversación o de documentos: las cantidades ya vienen calculadas
+(usá el campo "text" de cada cantidad, por ejemplo "172 barras" o "2.064 m"). Nunca sumes cantidades de unidades distintas (barras + kg).
+Si los datos no alcanzan para responder, decilo.
+Respondé primero el dato exacto que se preguntó. No reemplaces el dato pedido por un resumen general del pedido o del material;
+el contexto adicional va después y solo si sirve.
+- Cantidades: cantidad, unidad y material primero ("Se pidieron 172 barras de Acero Ø12 de 12 m cada una."), después el contexto útil.
+- Dinero: el importe primero y qué representa ("Acero Ø12 salió $ 3.241.168: 172 barras a $ 18.844."), después el contexto.
+- Entregas: lo entregado primero, lo pendiente si sirve y el pedido relacionado al final.
 Nunca menciones facturas: este sistema no maneja facturas.
 Respondé con JSON: { "text": "..." }.`;
 

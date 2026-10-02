@@ -58,7 +58,9 @@ export function EditItemSheet({
     const match = options.find((m) => normalize(m.name) === normalize(name));
     setDraft(match ? { ...draft, materialId: match.id, material: match.name, unit: match.unit, match: "matched", candidates: undefined } : { ...draft, material: name, materialId: null, match: "new", candidates: undefined });
   };
-  const save = () => onSave(interpretation.items.map((it, i) => (i === index ? { ...draft, quantity: qty, unitPrice } : it)));
+  // The printed size (12 m per barra) only describes the original purchase unit.
+  const unitSize = item && draft.unit === item.unit ? draft.unitSize : undefined;
+  const save = () => onSave(interpretation.items.map((it, i) => (i === index ? { ...draft, quantity: qty, unitPrice, unitSize } : it)));
   const remove = () => onSave(interpretation.items.filter((_, i) => i !== index));
 
   let hint: React.ReactNode;
@@ -153,6 +155,11 @@ export function EditItemSheet({
             </span>
           </label>
         </div>
+        {unitSize ? (
+          <span className="-mt-2 font-mono text-xs text-fg-3">
+            {formatNumber(unitSize.quantity)} {unitSize.unit} c/u · equivale a {formatNumber(qty * unitSize.quantity)} {unitSize.unit}
+          </span>
+        ) : null}
         <div className="flex gap-2.5">
           <label className="flex min-w-0 flex-1 flex-col gap-1.5">
             <FieldLabel>Precio unitario</FieldLabel>

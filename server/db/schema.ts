@@ -217,8 +217,18 @@ export const orderItems = sqliteTable(
     materialId: text("material_id").notNull().references(() => materials.id),
     /** Wording as it appeared in the order ("Barra Ø12 x 12 m"). */
     description: text("description").notNull(),
+    /** How many purchase units were ordered (172 barras → 172000). */
     quantityMilli: integer("quantity_milli").notNull(),
+    /** Purchase unit: what the supplier counts and prices (barra, bolsa, kg…). */
     unit: text("unit").notNull().references(() => units.code),
+    /**
+     * Optional size of ONE purchase unit, as printed by the supplier: "X BARRA 12 MT" → 12000 + "m",
+     * "bolsa x 50 kg" → 50000 + "kg". Equivalent quantities (172 barras = 2.064 m) are derived from
+     * it, never stored. Both columns are set together or both null.
+     */
+    unitSizeMilli: integer("unit_size_milli"),
+    unitSizeUnit: text("unit_size_unit").references(() => units.code),
+    /** Price of one purchase unit. */
     unitPriceMinor: integer("unit_price_minor"),
     lineTotalMinor: integer("line_total_minor"),
     position: integer("position").notNull(),

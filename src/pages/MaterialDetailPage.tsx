@@ -54,6 +54,8 @@ export function MaterialDetailPage() {
   const c = m.computation;
   const tag = statusTag(m);
   const unit = unitShort(m);
+  // Secondary: derived equivalent (172 barras = 2.064 m) and quantities in units that can't be converted (never added).
+  const unitsNote = [m.equivalent ? `Equivale a ${formatNumber(m.equivalent.quantity)} ${m.equivalent.unit}` : "", m.otherUnits ? `Además se pidieron ${m.otherUnits}, sin conversión a ${m.unit}` : ""].filter(Boolean).join(" · ");
   const lastChange = m.computationChanges.at(-1);
   const review = () => markReviewed.mutate(m.id, { onSuccess: () => toast("Marcado como revisado") });
   const subtitle = `${m.unit.charAt(0).toUpperCase()}${m.unit.slice(1)} · ${m.category} · Proveedor habitual: ${m.usualSupplier}`;
@@ -115,6 +117,7 @@ export function MaterialDetailPage() {
             valueClassName={c && c.variation > 0 ? "text-danger" : undefined}
           />
         </div>
+        {unitsNote ? <p className="-mt-1 font-mono text-xs text-fg-3">{unitsNote}</p> : null}
         {c ? (
           <div className="flex flex-col gap-2">
             <ComputationBar percent={c.percent} tone={barToneFor} height={8} split />
@@ -142,6 +145,7 @@ export function MaterialDetailPage() {
           <Figure label="Pedido" value={formatNumber(m.ordered)} unit={unit} small />
           <Figure label="Entregado" value={formatNumber(m.delivered)} unit={unit} small />
         </div>
+        {unitsNote ? <p className="-mt-1 font-mono text-xs text-fg-3">{unitsNote}</p> : null}
         {c ? (
           <>
             <ComputationBar percent={c.percent} tone={barToneFor} height={8} split />
@@ -192,7 +196,10 @@ export function MaterialDetailPage() {
                   <Pill tag={deliveryTag[o.delivery]} />
                   <Pill tag={paymentTag[o.payment]} />
                 </span>
-                <span className="w-[64px] text-right font-mono text-[13px] text-fg">{formatNumber(o.ordered)}</span>
+                <span className="w-[64px] text-right font-mono text-[13px] text-fg">
+                  {formatNumber(o.ordered)}
+                  {o.unit ? ` ${o.unit}` : ""}
+                </span>
                 <span className={cn("w-[84px] text-right font-mono text-[13px]", o.delivered < o.ordered ? "text-info" : "text-fg-2")}>{formatNumber(o.delivered)}</span>
                 <span className={cn("w-[84px] text-right font-mono text-[13px] font-semibold", c && o.cumulative > c.expected ? "text-danger" : "text-fg")}>{formatNumber(o.cumulative)}</span>
               </Link>
@@ -215,7 +222,7 @@ export function MaterialDetailPage() {
                     <span className="font-mono text-xs text-fg-3">{formatDate(o.date)}</span>
                   </span>
                   <span className="font-mono text-sm font-semibold text-fg">
-                    {formatNumber(o.ordered)} {unit}
+                    {formatNumber(o.ordered)} {o.unit ?? unit}
                   </span>
                 </span>
                 <span className="flex gap-1.5">

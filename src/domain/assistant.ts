@@ -43,9 +43,12 @@ export interface InterpretedOrderItem {
   /** Alternatives when the match is weak and needs the user to choose. */
   candidates?: MatchOption[];
   spec?: string;
+  /** Purchase quantity and unit label (172 barras). */
   quantity: number;
   unit: string;
-  /** Minor units. */
+  /** Size of one purchase unit, as printed ("X BARRA 12 MT" → 12 m). Dropped when the unit changes. */
+  unitSize?: { quantity: number; unit: string };
+  /** Minor units, per purchase unit. */
   unitPrice: number | null;
 }
 
@@ -177,7 +180,12 @@ export interface SuggestedAction {
   label: string;
   icon: "git-fork" | "store" | "upload" | "clipboard-list" | "truck";
   prompt?: string;
-  link?: { to: "/proveedores/$supplierId"; params: { supplierId: string } } | { to: "/materiales" } | { to: "/pedidos" };
+  link?:
+    | { to: "/proveedores/$supplierId"; params: { supplierId: string } }
+    | { to: "/materiales/$materialId"; params: { materialId: string } }
+    | { to: "/pedidos/$orderId"; params: { orderId: string } }
+    | { to: "/materiales" }
+    | { to: "/pedidos" };
 }
 
 export type AssistantBlock =

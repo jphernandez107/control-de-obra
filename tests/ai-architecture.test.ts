@@ -62,6 +62,13 @@ describe("AI contract validation", () => {
       "get_material_summary",
       "get_computation_variance",
       "list_unallocated_payments",
+      "search_materials",
+      "get_material_order_summary",
+      "get_material_delivery_summary",
+      "get_material_history",
+      "get_order_items",
+      "search_order_items",
+      "get_computation_comparison",
     ]);
   });
 

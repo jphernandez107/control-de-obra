@@ -11,16 +11,16 @@ import type {
 import type { StatusTag } from "../../src/domain/types";
 import { formatDate, formatMoney, formatNumber } from "../../src/domain/format";
 import type { Ledger } from "../domain/derive";
-import { matchMaterial } from "../domain/matching";
+import { canonicalMaterialName, matchMaterial } from "../domain/matching";
 import { parseMoneyToMinor } from "../domain/money";
 import { fromMilli, toMilli } from "../domain/quantity";
 import { orderFinancialSummary } from "../domain/summaries";
 import { normalizeText } from "../domain/text";
 import { isValidDate } from "../domain/time";
-import { unitCodeFromWord } from "../domain/units";
+import { resolveOrderLineUnit, unitCodeFromWord, type UnitSize } from "../domain/units";
 import type { Order } from "../repositories/snapshot";
 import { materialCandidates, rankOrderCandidates, resolveOrderReference, resolveSupplierMention, titleCase } from "./resolve";
-import type { AllocatePaymentIntent, CompleteOrderDeliveryIntent, CreateOrderIntent, CreateSupplierPaymentIntent, PayOrderBalanceIntent, RegisterDeliveryIntent } from "./schemas";
+import type { AllocatePaymentIntent, CompleteOrderDeliveryIntent, CreateOrderIntent, CreateSupplierPaymentIntent, ItemMention, PayOrderBalanceIntent, RegisterDeliveryIntent } from "./schemas";
 
 // Turns a validated intent into application-owned proposals (pending AI
 // actions). All matching (supplier, material, order) and every figure
@@ -69,23 +69,30 @@ export function proposeOrder(ledger: Ledger, ex: CreateOrderIntent, today: strin
   const document = options.document;
   const materials = materialCandidates(ledger);
   const flags: string[] = [];
+  const corrected: string[] = [];
+  const unconvertible: string[] = [];
   const items: InterpretedOrderItem[] = ex.items
     .filter((it) => it.quantity !== null && it.quantity > 0)
     .map((it, idx) => {
       const match = matchMaterial(it.material, materials);
-      const explicitUnit = unitCodeFromWord(it.unit, ledger.s.units);
       const material = match.status === "new" ? undefined : match.best!;
-      const unitCode = material ? (explicitUnit && explicitUnit !== material.baseUnit && ledger.inBaseUnit(material.id, 1000, explicitUnit) !== null ? explicitUnit : material.baseUnit) : explicitUnit ?? "unidad";
+      const line = orderLineUnit(ledger, it, material?.baseUnit ?? null);
+      if (line.corrected) corrected.push(`${formatNumber(it.quantity!)} ${ledger.unitLabel(line.unit)} de ${formatNumber(fromMilli(line.size!.milli))} ${ledger.unitLabel(line.size!.unit)} (${material?.name ?? canonicalMaterialName(it.material).name})`);
+      if (material && line.unit !== material.baseUnit && ledger.inBaseUnit(material.id, 1000, line.unit) === null && !(line.size && line.size.unit === material.baseUnit)) {
+        unconvertible.push(`${material.name} se lleva en ${ledger.unitLabel(material.baseUnit)} y aquí figura en ${ledger.unitLabel(line.unit)}`);
+      }
+      const canonical = canonicalMaterialName(it.material);
       return {
         id: `item-${idx + 1}`,
         materialId: material?.id ?? null,
-        material: material?.name ?? titleCase(it.material),
+        material: material?.name ?? canonical.name,
         mention: it.material,
         match: match.status,
         candidates: match.status === "matched" ? undefined : match.candidates.map((c) => ({ id: c.item.id, name: c.item.name, unit: ledger.unitLabel(c.item.baseUnit) })),
         spec: material ? ledger.material(material.id)?.spec ?? undefined : undefined,
         quantity: it.quantity!,
-        unit: ledger.unitLabel(unitCode),
+        unit: ledger.unitLabel(line.unit),
+        unitSize: line.size ? { quantity: fromMilli(line.size.milli), unit: ledger.unitLabel(line.size.unit) } : undefined,
         unitPrice: it.unitPrice === null ? null : parseMoneyToMinor(it.unitPrice),
       };
     });
@@ -127,7 +134,9 @@ export function proposeOrder(ledger: Ledger, ex: CreateOrderIntent, today: strin
   const weak = items.filter((i) => i.match === "suggested");
   if (weak.length) notes.push(`No estoy seguro de ${weak.map((i) => `«${i.mention}»`).join(" y ")}: lo asocié a ${weak.map((i) => i.material).join(" y ")}. Verifícalo tocando el ítem.`);
   const created = items.filter((i) => i.match === "new");
-  if (created.length) notes.push(`${created.map((i) => i.material).join(" y ")} no ${created.length === 1 ? "está" : "están"} en el catálogo: se ${created.length === 1 ? "agregará" : "agregarán"} como material nuevo.`);
+  if (created.length) notes.push(`${listOf(created.map((i) => i.material))} no ${created.length === 1 ? "está" : "están"} en el catálogo: se ${created.length === 1 ? "agregará como material nuevo" : "agregarán como materiales nuevos"}.`);
+  if (corrected.length) notes.push(`Tomé la cantidad como piezas compradas, no como medida: ${corrected.join("; ")}.`);
+  if (unconvertible.length) notes.push(`${unconvertible.join("; ")}: no se sumarán a lo pedido en esa unidad. Corrige la unidad si no es así.`);
   const priced = items.every((i) => i.unitPrice !== null) || interpretation.statedTotal != null;
   const lead = document
     ? `Es un comprobante de pedido de ${supplier.name || "un proveedor"}. Revisa antes de guardar:`
@@ -138,6 +147,26 @@ export function proposeOrder(ledger: Ledger, ex: CreateOrderIntent, today: strin
     proposals: [{ id, intent: "create_order", interpretation }],
     refs: { supplierIds: supplier.id ? [supplier.id] : [], materialIds: items.flatMap((i) => (i.materialId ? [i.materialId] : [])) },
   };
+}
+
+/**
+ * Purchase unit and size of an order line, decided by the application from
+ * the printed description ("X BARRA 12 MT") and the provider's unit word, so
+ * every provider gets the same result. The provider's own size fields are
+ * used only when the description does not state one.
+ */
+export function orderLineUnit(ledger: Ledger, it: ItemMention, materialUnit: string | null): { unit: string; size: UnitSize | null; corrected: boolean } {
+  const line = resolveOrderLineUnit(it.material, it.unit, ledger.s.units, materialUnit) ?? { unit: "unidad", size: null, corrected: false };
+  if (line.size) return line;
+  const sizeUnit = unitCodeFromWord(it.unitSizeUnit, ledger.s.units);
+  const milli = it.unitSize ? toMilli(it.unitSize) : null;
+  if (sizeUnit && milli && milli > 0 && sizeUnit !== line.unit && ["barra", "bolsa", "unidad", "malla"].includes(line.unit)) return { ...line, size: { milli, unit: sizeUnit } };
+  return line;
+}
+
+/** "A, B y C". */
+function listOf(parts: string[]): string {
+  return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} y ${parts.at(-1)}`;
 }
 
 function personName(ledger: Ledger, raw: string): string {

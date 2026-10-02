@@ -19,9 +19,12 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
   const desktop = useIsDesktop();
   const [editingAll, setEditingAll] = useState(false);
   const [field, setField] = useState<string | null>(null);
-  const ordered = i.items.reduce((s, it) => s + it.ordered, 0);
-  const after = i.items.reduce((s, it) => s + it.before + it.now, 0);
-  const complete = after >= ordered;
+  // Line by line: lines may be in different units (barras, kg), so they are never added up.
+  const complete = i.items.every((it) => it.before + it.now >= it.ordered);
+  const sameUnit = new Set(i.items.map((it) => it.unit)).size === 1 ? i.items[0]?.unit : undefined;
+  const progress = sameUnit
+    ? ` (${formatNumber(i.items.reduce((s, it) => s + it.before + it.now, 0))} de ${formatNumber(i.items.reduce((s, it) => s + it.ordered, 0))} ${sameUnit})`
+    : "";
   const flagged = (key: string) => i.flags.includes(key);
   const set = (key: keyof DeliveryInterpretation, value: string) =>
     onChange({ ...i, [key]: value, flags: i.flags.filter((f) => f !== key) });
@@ -149,7 +152,7 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
 
         <Outcome>
           {desktop
-            ? `Al confirmar, el pedido ${i.orderNumber} pasará a ${complete ? "Entregado" : "Entrega parcial"} (${formatNumber(after)} de ${formatNumber(ordered)} unidades). El estado de pago no cambia.`
+            ? `Al confirmar, el pedido ${i.orderNumber} pasará a ${complete ? "Entregado" : "Entrega parcial"}${progress}. El estado de pago no cambia.`
             : `Quedará en ${complete ? "Entregado" : "Entrega parcial"}. El pago no cambia.`}
         </Outcome>
       </div>

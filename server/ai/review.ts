@@ -1,12 +1,12 @@
 import type { ConfirmResult, DeliveryInterpretation, Interpretation, OrderInterpretation, PaymentInterpretation } from "../../src/domain/assistant";
 import type { StatusTag } from "../../src/domain/types";
-import { formatDate, formatMoney, formatNumber, paymentMethodLabel } from "../../src/domain/format";
+import { deliveryAmountLabel, formatDate, formatMoney, paymentMethodLabel } from "../../src/domain/format";
 import type { Ledger } from "../domain/derive";
 import { DomainError } from "../domain/errors";
 import { findOrdersByReference, matchMaterial } from "../domain/matching";
 import { toMilli } from "../domain/quantity";
 import { normalizeText } from "../domain/text";
-import { unitCodeFromWord } from "../domain/units";
+import { unitCodeFromWord, type UnitSize } from "../domain/units";
 import { allocatePayment, createOrder, createPayment, registerDelivery, type AllocationInput } from "../services/commands";
 import type { CommandContext } from "../services/context";
 import { buildDeliveryInterpretation, materialCandidates, resolveSupplierMention, withPaymentPreview } from "./proposals";
@@ -30,7 +30,10 @@ function reviseOrder(ledger: Ledger, i: OrderInterpretation): OrderInterpretatio
       return { ...it, material: material.name, match: it.match === "new" ? "matched" : it.match, spec: material.spec ?? undefined };
     }
     const exact = catalog.find((m) => normalizeText(m.name) === normalizeText(it.material) || m.aliases.some((a) => normalizeText(a) === normalizeText(it.material)));
-    if (exact) return { ...it, materialId: exact.id, material: exact.name, match: "matched" as const, candidates: undefined, unit: ledger.unitLabel(exact.baseUnit), spec: ledger.material(exact.id)?.spec ?? undefined };
+    if (exact) {
+      const unit = ledger.unitLabel(exact.baseUnit);
+      return { ...it, materialId: exact.id, material: exact.name, match: "matched" as const, candidates: undefined, unit, unitSize: unit === it.unit ? it.unitSize : undefined, spec: ledger.material(exact.id)?.spec ?? undefined };
+    }
     if (it.match === "new" && !it.materialId) return { ...it, candidates: undefined };
     const r = matchMaterial(it.material, catalog);
     if (r.status === "new") return { ...it, materialId: null, match: "new" as const, candidates: undefined, spec: undefined };
@@ -127,6 +130,14 @@ function unitCode(ledger: Ledger, label: string, material: string): string {
   return code;
 }
 
+function unitSizeOf(ledger: Ledger, it: OrderInterpretation["items"][number], unit: string): UnitSize | null {
+  if (!it.unitSize) return null;
+  const sizeUnit = unitCode(ledger, it.unitSize.unit, it.material);
+  const milli = toMilli(it.unitSize.quantity);
+  if (milli === null || milli <= 0) throw new DomainError("invalid_quantity", `La medida de ${it.material} no es válida.`);
+  return sizeUnit === unit ? null : { milli, unit: sizeUnit };
+}
+
 async function confirmOrder(ctx: CommandContext, ledger: Ledger, i: OrderInterpretation, after: () => Promise<Ledger>): Promise<ConfirmOutcome> {
   const supplierName = i.supplierName.trim();
   const supplier = i.supplierId && ledger.supplier(i.supplierId) ? { id: i.supplierId } : supplierName ? { newName: supplierName } : null;
@@ -137,12 +148,15 @@ async function confirmOrder(ctx: CommandContext, ledger: Ledger, i: OrderInterpr
     if (quantityMilli === null || quantityMilli <= 0) throw new DomainError("invalid_quantity", `La cantidad de ${it.material} no es válida.`);
     const material = it.materialId ? ledger.material(it.materialId) : undefined;
     if (!material && !it.material.trim()) throw new DomainError("material_unresolved", "Hay un ítem sin material. Complétalo o quítalo.");
+    const unit = unitCode(ledger, it.unit, it.material);
     return {
-      material: material ? { id: material.id } : { newName: it.material.trim(), unit: unitCode(ledger, it.unit, it.material) },
-      mention: material && it.mention && it.match !== "new" ? it.mention : undefined,
+      material: material ? { id: material.id } : { newName: it.material.trim(), unit },
+      // The wording heard or printed ("HIERRO DIAM.12 X BARRA 12 MT") becomes an alias of the chosen material.
+      mention: it.mention && (it.match !== "new" || !material) ? it.mention : undefined,
       description: material?.name ?? it.material.trim(),
       quantityMilli,
-      unit: unitCode(ledger, it.unit, it.material),
+      unit,
+      unitSize: unitSizeOf(ledger, it, unit),
       unitPriceMinor: it.unitPrice,
     };
   });
@@ -206,7 +220,7 @@ async function confirmDelivery(ctx: CommandContext, i: DeliveryInterpretation, a
     result: {
       recordId: `delivery:${deliveryId}`,
       title: "Entrega registrada",
-      subtitle: `Pedido ${summary.number} · ${summary.supplier.name} · ${formatNumber(summary.delivery.delivered)} de ${formatNumber(summary.delivery.ordered)} ${summary.delivery.unit}`,
+      subtitle: `Pedido ${summary.number} · ${summary.supplier.name} · ${deliveryAmountLabel(summary.delivery)}`,
       link: { to: "/pedidos/$orderId", params: { orderId: i.orderId } },
       tags: statusTags(fresh, i.orderId),
       documentName: i.document?.fileName,

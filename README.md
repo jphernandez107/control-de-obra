@@ -31,7 +31,8 @@ Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=
 | `npm test` | End-to-end scenarios and integrity tests (Vitest, real SQLite) |
 | `npm run typecheck` / `npm run build` | Type-check frontend + server / production build of the web app |
 | `npm run samples` | Regenerates the sample documents in `samples/` |
-| `npm run cf:migrate` / `cf:deploy` / `cf:logs` / `cf:bootstrap` / `cf:password` | Cloudflare production — see [Production](#production-cloudflare) |
+| `npm run cf:migrate` / `cf:deploy` / `cf:logs` / `cf:bootstrap` / `cf:password` / `cf:fix-units` | Cloudflare production — see [Production](#production-cloudflare) |
+| `npm run fix:units -- [--order N] [--apply]` | Correct order lines imported as meters that were bars ("X BARRA 12 MT"); dry run unless `--apply` |
 | `npm run cf:dev` | Builds and runs the Worker locally in `workerd` with a local D1/R2 (needs `.dev.vars`, see `.dev.vars.example`) |
 
 ### Environment
@@ -102,6 +103,14 @@ npx wrangler secret delete APP_USERS   # no longer read
 ```
 
 Until `cf:password` runs, nobody can sign in. Other people who could sign in before lose access (their passwords lived only in `APP_USERS`); add them again from Usuarios. Someone already named in records (e.g. «pedido por Marcelo») gets the login on that same person, so their history stays linked.
+
+**Purchase units (migration 0004).** An order line keeps what the supplier counts and prices (`172 barras`) and, when the document prints it, the size of one piece (`unit_size_milli`/`unit_size_unit`: 12 m per bar, 50 kg per bag). Equivalents (2.064 m) are derived. Lines imported before 0004 as meters ("HIERRO DIAM.12 X BARRA 12 MT · 172 m") are corrected with a dry-run-first script that only touches lines with that explicit evidence and no deliveries, and writes an audit row. Step-by-step for order #1: [docs/DEPLOY_UNITS_HANDOFF.md](docs/DEPLOY_UNITS_HANDOFF.md).
+
+```bash
+npm run cf:migrate                          # 0004: two nullable columns on order_items, no data change
+npm run cf:fix-units -- --order 1           # dry run: prints the plan, writes data/fix-purchase-units.sql
+npm run cf:fix-units -- --order 1 --apply   # applies it (idempotent); re-run reports nothing to fix
+```
 
 **Restore D1 (Time Travel, included in Free, 7 days of history):**
 

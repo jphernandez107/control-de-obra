@@ -1,15 +1,15 @@
 import { CircleCheck, PackageCheck, Truck, Wallet } from "lucide-react";
 import type { OrderSummary } from "@/domain/types";
-import { formatMoney, formatNumber } from "@/domain/format";
+import { deliveryAmountLabel, formatMoney } from "@/domain/format";
 import { Progress, type ProgressTone } from "../ui/Progress";
 import { cn } from "../ui/cn";
 
 function deliveryVisual(o: OrderSummary) {
   const d = o.delivery;
-  const pct = d.ordered ? (d.delivered / d.ordered) * 100 : 0;
+  const pct = d.percent;
   if (d.status === "entregado") return { icon: PackageCheck, color: "text-success", tone: "success" as ProgressTone, label: "Entregado", short: "Entregado", pct };
   if (d.status === "parcial")
-    return { icon: Truck, color: "text-info", tone: "info" as ProgressTone, label: "Entrega parcial", short: `Parcial ${formatNumber(d.delivered)}/${formatNumber(d.ordered)}`, pct };
+    return { icon: Truck, color: "text-info", tone: "info" as ProgressTone, label: "Entrega parcial", short: d.sameUnit ? `Parcial ${d.percent}%` : `Parcial ${d.completeLines}/${d.lines}`, pct };
   return { icon: Truck, color: "text-fg-2", tone: "neutral" as ProgressTone, label: "Pendiente", short: "Pendiente", pct: 0 };
 }
 
@@ -24,8 +24,7 @@ function paymentVisual(o: OrderSummary) {
 export function DeliveryCell({ order }: { order: OrderSummary }) {
   const v = deliveryVisual(order);
   const d = order.delivery;
-  const detail =
-    d.status === "entregado" ? (order.itemsLabel.includes("materiales") ? "Completo" : `${formatNumber(d.delivered)}/${formatNumber(d.ordered)} ${d.unit}`) : `${formatNumber(d.delivered)} de ${formatNumber(d.ordered)} ${d.unit}`;
+  const detail = d.status === "entregado" && d.lines > 1 ? "Completo" : deliveryAmountLabel(d);
   return (
     <StatusCell icon={<v.icon size={14} className={v.color} />} label={v.label} color={v.color} pct={v.pct} tone={v.tone} detail={detail} />
   );

@@ -109,6 +109,10 @@ export function OrderCard({ interpretation: i, confirming, onChange, onConfirm, 
                 </span>
                 {it.match === "suggested" && it.mention ? (
                   <span className="text-xs text-warning">Dijiste «{it.mention}» · toca para confirmar</span>
+                ) : it.unitSize ? (
+                  <span className="font-mono text-xs text-fg-3">
+                    {formatNumber(it.unitSize.quantity)} {it.unitSize.unit} c/u · {formatNumber(it.quantity * it.unitSize.quantity)} {it.unitSize.unit}
+                  </span>
                 ) : it.spec ? (
                   <span className="font-mono text-xs text-fg-3">{it.spec}</span>
                 ) : null}

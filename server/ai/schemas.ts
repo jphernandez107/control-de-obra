@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AIError } from "./errors";
+import { MATERIAL_METRICS } from "./question-semantics";
 
 // Application-owned contract for what any AI provider must return. Providers
 // only *extract* what the user or a document says (mentions, quantities,
@@ -20,6 +21,13 @@ export const PROJECT_QUERY_NAMES = [
   "get_material_summary",
   "get_computation_variance",
   "list_unallocated_payments",
+  "search_materials",
+  "get_material_order_summary",
+  "get_material_delivery_summary",
+  "get_material_history",
+  "get_order_items",
+  "search_order_items",
+  "get_computation_comparison",
 ] as const;
 
 export type ProjectQueryName = (typeof PROJECT_QUERY_NAMES)[number];
@@ -47,12 +55,17 @@ const base = {
 };
 
 export const ItemMentionSchema = z.object({
-  /** Material exactly as written/said ("barras del 12", "acero 12 mm", "cemento"). */
+  /** Material exactly as written/said ("barras del 12", "HIERRO DIAM.12 X BARRA 12 MT", "cemento"). */
   material: z.string().min(1).max(120),
+  /** How many purchase units: for "HIERRO DIAM.12 X BARRA 12 MT · cantidad 172" it is 172 (bars), not meters. */
   quantity: z.number().positive().nullable(),
-  /** Unit word as written ("barras", "bolsas", "m3"). */
+  /** Purchase unit word as written ("barras", "bolsas", "m3", "kg"). The unit of `quantity`. */
   unit: optionalText(40),
-  /** Unit price in pesos, only when explicitly stated. */
+  /** Size of ONE purchase unit when the description states it: "X BARRA 12 MT" → 12; "bolsa x 50 kg" → 50. */
+  unitSize: z.number().positive().nullable().optional(),
+  /** Unit of `unitSize` ("m", "kg"). */
+  unitSizeUnit: optionalText(20).optional(),
+  /** Price of one purchase unit in pesos, only when explicitly stated. */
   unitPrice: z.number().nonnegative().nullable(),
 });
 
@@ -144,6 +157,15 @@ export const ProjectQuestionSchema = z.object({
   material: optionalText(120),
   /** For order questions: what the user cares about. */
   aspect: z.enum(["overall", "delivery", "payment"]).nullable(),
+  /**
+   * For material questions, the exact fact asked: ordered_quantity ("¿cuántas se pidieron?"),
+   * delivered_quantity ("¿cuántas llegaron?"), pending_delivery_quantity ("¿cuántas faltan que lleguen?"),
+   * expected_quantity ("¿cuántas necesitamos?", cómputo), remaining_to_order_quantity ("¿cuánto falta pedir?"),
+   * ordered_amount ("¿cuánto salió?"), unit_price ("¿cuánto costó cada una?"), purchase_history.
+   */
+  metric: z.enum(MATERIAL_METRICS).nullable().optional(),
+  /** Unit the answer is asked in, as written ("metros lineales", "kilos", "barras"). */
+  unit: optionalText(40).optional(),
   /** "¿Y cuánto falta pagar?": refers to the entity of the previous exchange. */
   refersToPrevious: z.boolean(),
 });

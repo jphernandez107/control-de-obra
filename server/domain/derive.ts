@@ -29,7 +29,8 @@ import type {
   SuppliersOverview,
 } from "../../src/domain/types";
 import { formatMoney, formatNumber, paymentMethodLabel } from "../../src/domain/format";
-import { convertMilli, fromMilli } from "./quantity";
+import { convertMilli, fromMilli, QTY_SCALE } from "./quantity";
+import type { UnitSize } from "./units";
 import { localDate, localDateTime } from "./time";
 import type {
   AuditRow,
@@ -41,7 +42,19 @@ import type {
   Payment,
   Snapshot,
   Supplier,
+  Unit as UnitRow,
 } from "../repositories/snapshot";
+
+/** Units counted in pieces, whose size can be expressed in a measure unit. */
+const PIECE_UNITS = new Set(["barra", "bolsa", "unidad", "malla"]);
+/** Measure units, in order of preference for a piece's size (a bar is described by its length first). */
+const MEASURE_UNITS = ["m", "kg", "m2", "m3", "l"];
+
+/** "172 barras", "1 barra", "50 unidades", "100 kg", "2.064 m". */
+export function quantityPhrase(value: number, unit: { code: string; label: string; singular: string; plural: string }): string {
+  const symbol = unit.code !== "unidad" && (unit.label.length <= 3 || /[²³]/.test(unit.label));
+  return `${formatNumber(value)} ${symbol ? unit.label : value === 1 ? unit.singular : unit.plural}`;
+}
 
 // Pure derivations: snapshot of persisted records → the read models the UI
 // renders. Statuses (delivery, payment, computation) and balances are always
@@ -99,6 +112,7 @@ export class Ledger {
   private allocationsByOrder: Map<string, Snapshot["allocations"]>;
   private allocationsByPayment: Map<string, Snapshot["allocations"]>;
   private unitLabels: Map<string, string>;
+  private unitByCode: Map<string, UnitRow>;
   private aliasesByMaterial: Map<string, string[]>;
 
   constructor(snapshot: Snapshot) {
@@ -116,6 +130,7 @@ export class Ledger {
     this.allocationsByOrder = groupBy(snapshot.allocations, (a) => a.orderId);
     this.allocationsByPayment = groupBy(snapshot.allocations, (a) => a.paymentId);
     this.unitLabels = new Map(snapshot.units.map((u) => [u.code, u.label]));
+    this.unitByCode = new Map(snapshot.units.map((u) => [u.code, u]));
     this.aliasesByMaterial = new Map();
     for (const a of snapshot.aliases) this.aliasesByMaterial.set(a.materialId, [...(this.aliasesByMaterial.get(a.materialId) ?? []), a.alias]);
   }
@@ -179,11 +194,11 @@ export class Ledger {
   paymentUnallocated(payment: Payment): number {
     return payment.amountMinor - this.paymentAllocated(payment.id);
   }
+  /** Decided line by line: lines in different units (barras, kg) are never added together. */
   orderDeliveryStatus(order: Order): DeliveryStatus {
     const items = this.items(order.id);
-    const ordered = items.reduce((s, i) => s + i.quantityMilli, 0);
-    const delivered = items.reduce((s, i) => s + Math.min(this.deliveredMilli(i.id), i.quantityMilli), 0);
-    return deliveryStatusOf(ordered, delivered);
+    if (items.length && items.every((i) => this.remainingMilli(i) === 0)) return "entregado";
+    return items.some((i) => this.deliveredMilli(i.id) > 0) ? "parcial" : "pendiente";
   }
   orderPaymentStatus(order: Order): PaymentStatus {
     return paymentStatusOf(this.orderValue(order), this.orderPaid(order.id));
@@ -192,20 +207,58 @@ export class Ledger {
     return localDate(iso, this.tz);
   }
 
+  /** Converts with the catalog conversions of a material (or generic ones); null when none is defined. */
+  convertForMaterial(materialId: string, milli: number, from: string, to: string): number | null {
+    if (from === to) return milli;
+    const conv = this.s.conversions;
+    const direct = conv.find((c) => c.materialId === materialId && c.fromUnit === from && c.toUnit === to) ?? conv.find((c) => c.materialId === null && c.fromUnit === from && c.toUnit === to);
+    if (direct) return convertMilli(milli, direct.factorNum, direct.factorDen);
+    const inverse = conv.find((c) => c.materialId === materialId && c.fromUnit === to && c.toUnit === from) ?? conv.find((c) => c.materialId === null && c.fromUnit === to && c.toUnit === from);
+    if (inverse) return convertMilli(milli, inverse.factorDen, inverse.factorNum);
+    return null;
+  }
+
   /** Quantity expressed in the material's base unit, or null when no conversion is defined. */
   inBaseUnit(materialId: string, milli: number, unit: string): number | null {
     const material = this.material(materialId);
-    if (!material) return null;
-    if (unit === material.baseUnit) return milli;
-    const direct =
-      this.s.conversions.find((c) => c.materialId === materialId && c.fromUnit === unit && c.toUnit === material.baseUnit) ??
-      this.s.conversions.find((c) => c.materialId === null && c.fromUnit === unit && c.toUnit === material.baseUnit);
-    if (direct) return convertMilli(milli, direct.factorNum, direct.factorDen);
-    const inverse =
-      this.s.conversions.find((c) => c.materialId === materialId && c.fromUnit === material.baseUnit && c.toUnit === unit) ??
-      this.s.conversions.find((c) => c.materialId === null && c.fromUnit === material.baseUnit && c.toUnit === unit);
-    if (inverse) return convertMilli(milli, inverse.factorDen, inverse.factorNum);
+    return material ? this.convertForMaterial(materialId, milli, unit, material.baseUnit) : null;
+  }
+
+  /**
+   * Size of one purchase unit of an order line: what the supplier printed
+   * ("X BARRA 12 MT"), else the material's catalog conversion from a piece
+   * unit to a measure (1 barra Ø12 = 12 m). Null for lines bought by measure.
+   */
+  unitSizeOf(item: OrderItem): UnitSize | null {
+    if (item.unitSizeMilli && item.unitSizeUnit) return { milli: item.unitSizeMilli, unit: item.unitSizeUnit };
+    if (!PIECE_UNITS.has(item.unit)) return null;
+    for (const unit of MEASURE_UNITS) {
+      const size = this.convertForMaterial(item.materialId, QTY_SCALE, item.unit, unit);
+      if (size !== null && size > 0) return { milli: size, unit };
+    }
     return null;
+  }
+
+  /** `milli` of an order line's purchase unit expressed in `unit` (172 barras → 2.064 m), or null. */
+  lineQuantityIn(item: OrderItem, milli: number, unit: string): number | null {
+    if (item.unit === unit) return milli;
+    if (item.unitSizeMilli && item.unitSizeUnit === unit) return convertMilli(milli, item.unitSizeMilli, QTY_SCALE);
+    return this.convertForMaterial(item.materialId, milli, item.unit, unit);
+  }
+
+  /** Derived equivalent of an order line's quantity (172 barras → 2.064 m). */
+  equivalentOf(item: OrderItem, milli = item.quantityMilli): { milli: number; unit: string } | null {
+    const size = this.unitSizeOf(item);
+    return size ? { milli: convertMilli(milli, size.milli, QTY_SCALE), unit: size.unit } : null;
+  }
+
+  unitInfo(code: string): UnitRow | undefined {
+    return this.unitByCode.get(code);
+  }
+
+  /** "172 barras", "1 barra", "100 kg", "2.064 m" — for sentences. */
+  quantityText(milli: number, unit: string): string {
+    return quantityPhrase(fromMilli(milli), this.unitInfo(unit) ?? { code: unit, label: unit, singular: unit, plural: unit });
   }
 
   // ------------------------------------------------------------ documents
@@ -277,6 +330,7 @@ export class Ledger {
       .map((i) => ({ i, rest: this.remainingMilli(i) }))
       .filter(({ rest }) => rest > 0)
       .map(({ i, rest }) => `${formatNumber(fromMilli(rest))} ${this.unitLabel(i.unit)} ${this.shortMaterial(i)}`);
+    if (parts.length > 3) return `Faltan ${parts.length} materiales`;
     return parts.length ? `Faltan ${parts.join(" y ")}` : undefined;
   }
 
@@ -301,11 +355,28 @@ export class Ledger {
     return this.s.pendingInterpretations.some((p) => p.intent === "register_delivery" && p.proposal.includes(`"orderId":"${orderId}"`));
   }
 
+  /** Delivery progress without adding quantities of different units together. */
+  deliveryProgress(order: Order): OrderSummary["delivery"] {
+    const items = this.items(order.id);
+    const delivered = (i: OrderItem) => Math.min(this.deliveredMilli(i.id), i.quantityMilli);
+    const units = new Set(items.map((i) => i.unit));
+    const shares = items.map((i) => delivered(i) / i.quantityMilli);
+    return {
+      status: this.orderDeliveryStatus(order),
+      lines: items.length,
+      completeLines: items.filter((i) => this.remainingMilli(i) === 0).length,
+      deliveries: this.deliveriesOf(order.id).length,
+      percent: shares.length ? Math.round((shares.reduce((s, x) => s + x, 0) / shares.length) * 100) : 0,
+      sameUnit:
+        units.size === 1
+          ? { ordered: fromMilli(items.reduce((s, i) => s + i.quantityMilli, 0)), delivered: fromMilli(items.reduce((s, i) => s + delivered(i), 0)), unit: this.unitLabel([...units][0]!) }
+          : null,
+      pendingLabel: this.pendingLabel(order),
+    };
+  }
+
   toOrderSummary(order: Order): OrderSummary {
     const items = this.items(order.id);
-    const orderedMilli = items.reduce((s, i) => s + i.quantityMilli, 0);
-    const deliveredMilli = items.reduce((s, i) => s + Math.min(this.deliveredMilli(i.id), i.quantityMilli), 0);
-    const units = new Set(items.map((i) => i.unit));
     const total = this.orderValue(order);
     const paid = this.orderPaid(order.id);
     return {
@@ -317,13 +388,7 @@ export class Ledger {
       materialNames: items.map((i) => `${i.description} ${this.material(i.materialId)?.name ?? ""}`),
       total,
       pendingPayment: total === null ? null : Math.max(total - paid, 0),
-      delivery: {
-        status: deliveryStatusOf(orderedMilli, deliveredMilli),
-        ordered: fromMilli(orderedMilli),
-        delivered: fromMilli(deliveredMilli),
-        unit: units.size === 1 ? this.unitLabel([...units][0]!) : "u",
-        pendingLabel: this.pendingLabel(order),
-      },
+      delivery: this.deliveryProgress(order),
       payment: {
         status: paymentStatusOf(total, paid),
         paid,
@@ -389,17 +454,23 @@ export class Ledger {
       .sort((a, b) => b.paymentDate.localeCompare(a.paymentDate))
       .map((p) => this.toPaymentDto(p, order.id));
     const orderedBy = order.orderedByUserId ? this.s.users.find((u) => u.id === order.orderedByUserId) : undefined;
-    const lines: OrderLine[] = items.map((i) => ({
-      id: i.id,
-      materialId: i.materialId,
-      materialName: i.description,
-      spec: this.material(i.materialId)?.spec ?? undefined,
-      quantity: fromMilli(i.quantityMilli),
-      unit: this.unitLabel(i.unit),
-      unitPrice: i.unitPriceMinor,
-      amount: i.lineTotalMinor,
-      delivered: fromMilli(this.deliveredMilli(i.id)),
-    }));
+    const lines: OrderLine[] = items.map((i) => {
+      const size = this.unitSizeOf(i);
+      const equivalent = this.equivalentOf(i);
+      return {
+        id: i.id,
+        materialId: i.materialId,
+        materialName: i.description,
+        spec: this.material(i.materialId)?.spec ?? undefined,
+        quantity: fromMilli(i.quantityMilli),
+        unit: this.unitLabel(i.unit),
+        unitSize: size ? { quantity: fromMilli(size.milli), unit: this.unitLabel(size.unit) } : undefined,
+        equivalent: equivalent ? { quantity: fromMilli(equivalent.milli), unit: this.unitLabel(equivalent.unit) } : undefined,
+        unitPrice: i.unitPriceMinor,
+        amount: i.lineTotalMinor,
+        delivered: fromMilli(this.deliveredMilli(i.id)),
+      };
+    });
     return {
       ...summary,
       reference: order.reference,
@@ -596,28 +667,47 @@ export class Ledger {
 
   // ------------------------------------------------------------ materials
 
-  /** Ordered and delivered quantities of a material in its base unit (historical records, no reassignment needed). */
+  /** Delivered quantity of a delivery line in `unit`, using its order line's size when it has one. */
+  private deliveryLineIn(di: Snapshot["deliveryItems"][number], unit: string): number | null {
+    const item = di.orderItemId ? this.orderItem(di.orderItemId) : undefined;
+    if (item && item.unit === di.unit) return this.lineQuantityIn(item, di.quantityMilli, unit);
+    return this.convertForMaterial(di.materialId, di.quantityMilli, di.unit, unit);
+  }
+
+  /**
+   * Ordered and delivered quantities of a material in its base unit
+   * (historical records, no reassignment needed). Lines that cannot be
+   * converted are kept apart per unit in `other*`: never added to the total.
+   */
   materialTotals(materialId: string) {
+    const material = this.material(materialId);
+    const base = material?.baseUnit ?? "";
     let orderedMilli = 0;
     let deliveredMilli = 0;
     let unconverted = 0;
-    const lines: { order: Order; item: OrderItem }[] = [];
+    const otherOrdered = new Map<string, number>();
+    const otherDelivered = new Map<string, number>();
+    const lines: { order: Order; item: OrderItem; baseMilli: number | null }[] = [];
     for (const item of this.s.orderItems) {
       if (item.materialId !== materialId) continue;
       const order = this.order(item.orderId);
       if (!order) continue;
-      lines.push({ order, item });
-      const q = this.inBaseUnit(materialId, item.quantityMilli, item.unit);
-      if (q === null) unconverted++;
-      else orderedMilli += q;
+      const q = this.lineQuantityIn(item, item.quantityMilli, base);
+      lines.push({ order, item, baseMilli: q });
+      if (q === null) {
+        unconverted++;
+        otherOrdered.set(item.unit, (otherOrdered.get(item.unit) ?? 0) + item.quantityMilli);
+      } else orderedMilli += q;
     }
     for (const di of this.s.deliveryItems) {
       if (di.materialId !== materialId) continue;
-      const q = this.inBaseUnit(materialId, di.quantityMilli, di.unit);
-      if (q === null) unconverted++;
-      else deliveredMilli += q;
+      const q = this.deliveryLineIn(di, base);
+      if (q === null) {
+        unconverted++;
+        otherDelivered.set(di.unit, (otherDelivered.get(di.unit) ?? 0) + di.quantityMilli);
+      } else deliveredMilli += q;
     }
-    return { orderedMilli, deliveredMilli, unconverted, lines };
+    return { orderedMilli, deliveredMilli, unconverted, otherOrdered, otherDelivered, lines };
   }
 
   computationItem(materialId: string) {
@@ -647,10 +737,19 @@ export class Ledger {
     };
   }
 
+  /** Equivalent of everything ordered of a material, only when every line has one in the same unit. */
+  materialEquivalent(materialId: string): { milli: number; unit: string } | null {
+    const items = this.s.orderItems.filter((i) => i.materialId === materialId && this.order(i.orderId));
+    const eq = items.map((i) => this.equivalentOf(i));
+    if (!eq.length || eq.some((e) => !e) || new Set(eq.map((e) => e!.unit)).size !== 1) return null;
+    return { milli: eq.reduce((s, e) => s + e!.milli, 0), unit: eq[0]!.unit };
+  }
+
   toMaterialSummary(m: Material): MaterialSummary {
     const t = this.materialTotals(m.id);
     const lastOrder = t.lines.map((x) => x.order).sort((a, b) => b.orderDate.localeCompare(a.orderDate))[0];
     const supplierId = m.usualSupplierId ?? lastOrder?.supplierId;
+    const equivalent = this.materialEquivalent(m.id);
     return {
       id: m.id,
       name: m.name,
@@ -660,6 +759,8 @@ export class Ledger {
       ordered: fromMilli(t.orderedMilli),
       delivered: fromMilli(t.deliveredMilli),
       pendingDelivery: fromMilli(Math.max(t.orderedMilli - t.deliveredMilli, 0)),
+      equivalent: equivalent && equivalent.unit !== m.baseUnit ? { quantity: fromMilli(equivalent.milli), unit: this.unitLabel(equivalent.unit) } : undefined,
+      otherUnits: t.otherOrdered.size ? [...t.otherOrdered].map(([unit, milli]) => `${formatNumber(fromMilli(milli))} ${this.unitLabel(unit)}`).join(" y ") : undefined,
       lastOrderDate: lastOrder?.orderDate ?? "",
       computation: this.computationFor(m.id, t.orderedMilli),
     };
@@ -696,18 +797,21 @@ export class Ledger {
     const summary = this.toMaterialSummary(m);
     const t = this.materialTotals(m.id);
     const lines = [...t.lines].sort((a, b) => a.order.orderDate.localeCompare(b.order.orderDate));
+    // Rows are in the material's base unit; a line that cannot be converted keeps its own figures out of the running total.
     let cumulative = 0;
-    const orders = lines.map(({ order, item }) => {
-      cumulative += item.quantityMilli;
+    const orders = lines.map(({ order, item, baseMilli }) => {
+      const delivered = baseMilli === null ? null : this.lineQuantityIn(item, this.deliveredMilli(item.id), m.baseUnit);
+      cumulative += baseMilli ?? 0;
       return {
         orderId: order.id,
         orderNumber: this.orderNumber(order),
         date: order.orderDate,
         delivery: this.orderDeliveryStatus(order),
         payment: this.orderPaymentStatus(order),
-        ordered: fromMilli(item.quantityMilli),
-        delivered: fromMilli(this.deliveredMilli(item.id)),
+        ordered: fromMilli(baseMilli ?? item.quantityMilli),
+        delivered: fromMilli(delivered ?? this.deliveredMilli(item.id)),
         cumulative: fromMilli(cumulative),
+        unit: baseMilli === null ? this.unitLabel(item.unit) : undefined,
       };
     });
     const deliveryIds = new Set(this.s.deliveryItems.filter((d) => d.materialId === m.id).map((d) => d.deliveryId));
@@ -718,12 +822,12 @@ export class Ledger {
         id: d.id,
         label: d.reference ? `Remito ${d.reference}` : "Entrega sin remito",
         date: d.deliveryDate,
-        quantity: fromMilli(this.s.deliveryItems.filter((x) => x.deliveryId === d.id && x.materialId === m.id).reduce((s, x) => s + x.quantityMilli, 0)),
+        quantity: fromMilli(this.s.deliveryItems.filter((x) => x.deliveryId === d.id && x.materialId === m.id).reduce((s, x) => s + (this.deliveryLineIn(x, m.baseUnit) ?? 0), 0)),
         pending: false,
       }));
     for (const { order, item } of lines) {
-      const rest = this.remainingMilli(item);
-      if (rest > 0) deliveries.push({ id: `pend-${item.id}`, label: `Pedido ${this.orderNumber(order)}`, date: null, quantity: fromMilli(rest), pending: true });
+      const rest = this.lineQuantityIn(item, this.remainingMilli(item), m.baseUnit);
+      if (rest !== null && rest > 0) deliveries.push({ id: `pend-${item.id}`, label: `Pedido ${this.orderNumber(order)}`, date: null, quantity: fromMilli(rest), pending: true });
     }
     const changes: ComputationChange[] = this.s.computationRevisions
       .filter((r) => r.materialId === m.id)

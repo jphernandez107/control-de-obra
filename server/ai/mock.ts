@@ -1,7 +1,9 @@
 import { formatMoney } from "../../src/domain/format";
 import { addDays } from "../domain/time";
 import { normalizeText } from "../domain/text";
-import type { AIConversationContext, AIDocumentInput, AIInterpretationInput, AIProvider, AIQuestionInput } from "./provider";
+import { isGenericMaterialMention, matchMaterial } from "../domain/matching";
+import type { AIConversationContext, AIDocumentInput, AIInterpretationInput, AIProjectContext, AIProvider, AIQuestionInput } from "./provider";
+import { inferMetric, inferRequestedUnit, isQuantityMetric, materialMentionIn, type MaterialMetric } from "./question-semantics";
 import type { AIAnswerResult, AIInterpretation, AIInterpretationResult, DocumentType, ItemMention, ProjectQuestion } from "./schemas";
 
 // Deterministic stand-in for a language model (AI_PROVIDER=mock). It
@@ -77,7 +79,8 @@ function supplierMention(text: string, suppliers: string[]): string | null {
       .filter((w) => w.length >= 5 && !["corralon", "proveedor"].includes(w));
     if (words.some((w) => new RegExp(`\\b${w.slice(0, Math.max(5, w.length - 2))}`).test(t))) return name;
   }
-  const m = /\b(?:a|de|del|con)\s+((?:[A-ZÁÉÍÓÚÑ][\wáéíóúñ]+)(?:\s+(?:del?|la|los|las|y|[A-ZÁÉÍÓÚÑ][\wáéíóúñ]+))*)/.exec(text);
+  // Within one line: a printed document's next line is not part of the name.
+  const m = /\b(?:a|de|del|con)[ \t]+((?:[A-ZÁÉÍÓÚÑ][\wáéíóúñ]+)(?:[ \t]+(?:del?|la|los|las|y|[A-ZÁÉÍÓÚÑ][\wáéíóúñ]+))*)/.exec(text);
   if (m && !/^(Pedido|Remito)$/.test(m[1]!.split(" ")[0]!)) return m[1]!.replace(/\s+(del?|la|los|las|y)$/, "");
   return null;
 }
@@ -128,7 +131,18 @@ function parseItems(text: string, supplier: string | null): ItemMention[] {
 
 type Question = Omit<ProjectQuestion, "intent" | "confidence" | "note">;
 
-function question(text: string, suppliers: string[]): Question {
+const MATERIAL_QUERY: Record<MaterialMetric, Question["query"]> = {
+  ordered_quantity: "get_material_order_summary",
+  ordered_amount: "get_material_order_summary",
+  unit_price: "get_material_order_summary",
+  purchase_history: "get_material_history",
+  delivered_quantity: "get_material_delivery_summary",
+  pending_delivery_quantity: "get_material_delivery_summary",
+  expected_quantity: "get_computation_comparison",
+  remaining_to_order_quantity: "get_computation_comparison",
+};
+
+function question(text: string, suppliers: string[], conversation?: AIConversationContext, materials: AIProjectContext["materials"] = []): Question {
   const t = normalizeText(text);
   const supplier = supplierMention(text, suppliers);
   const ref = orderReference(text);
@@ -145,6 +159,18 @@ function question(text: string, suppliers: string[]): Question {
   const followUp = !ref && !supplier && /^(y|e)\b|^(y )?(cuanto|como|que)\b.*\b(falta|viene|va|esta|queda)\b/.test(t);
   if (/sin imputar/.test(t)) return q("list_unallocated_payments", { supplier });
   if (/entregad[oa]s? (y|pero)? ?(no|sin) pag|entregad[oa]s? sin pagar|llegaron y no (pagamos|se pagaron)/.test(t)) return q("list_delivered_unpaid_orders", { supplier });
+  // A fact about one material: "¿cuántas barras del 12 se pidieron?", "¿y cuántas llegaron?".
+  const metric = inferMetric(text);
+  const mention = materialMentionIn(text);
+  // Like a model reading the catalog it was given: the mention must name a known material.
+  const catalog = materials.map((m, i) => ({ id: String(i), name: m.name, shortName: m.name, aliases: m.aliases, baseUnit: m.unit }));
+  const named = Boolean(mention && !isGenericMaterialMention(mention) && matchMaterial(mention, catalog).status !== "new");
+  const previousMaterial = Boolean(conversation?.focus.material);
+  if (metric && !ref && (named || (followUp && !supplier && previousMaterial) || (mention && isGenericMaterialMention(mention) && isQuantityMetric(metric)))) {
+    // Only a supplier named in full: "hierro" is a material here, not "Hierros Córdoba".
+    const namedSupplier = suppliers.find((n) => t.includes(normalizeText(n))) ?? null;
+    return q(MATERIAL_QUERY[metric], { material: named ? mention : null, supplier: namedSupplier, metric, unit: inferRequestedUnit(text), refersToPrevious: !named });
+  }
   if (/falta(n)? pagar|saldo del pedido|debemos del pedido|queda por pagar/.test(t) && (ref || !supplier)) return q("get_order_summary", { orderReference: ref, aspect: "payment", refersToPrevious: !ref });
   if (/pendientes? de entrega|falta(n)? (entregar|llegar)|sin entregar|que falta|no llego|no llegaron|entregas pendientes/.test(t)) {
     if (ref || followUp) return q("get_order_summary", { orderReference: ref, aspect: "delivery", refersToPrevious: !ref });
@@ -152,7 +178,7 @@ function question(text: string, suppliers: string[]): Question {
   }
   if (/pasando del computo|computo|previsto|nos pasamos/.test(t)) return q("get_computation_variance");
   if (/debemos|debo|saldo|deuda|adeud|cuenta corriente/.test(t)) return supplier ? q("get_supplier_summary", { supplier }) : q("list_supplier_balances");
-  const qty = /cuant[oa]s?\s+(.+?)\s+(?:llevamos|hemos|tenemos|pedimos|se pidi|van|fueron|nos)/.exec(t);
+  const qty = /cuant[oa]s?\s+(.+?)\s+(?:llevamos|hemos|tenemos|van|fueron|nos)/.exec(t);
   if (qty) return q("get_material_summary", { material: qty[1]!.replace(/^(de|del)\s+/, "") });
   if (/como (esta|va|viene)|estado|que paso/.test(t) && (ref || followUp)) return q("get_order_summary", { orderReference: ref, aspect: "overall", refersToPrevious: !ref });
   return q("general", { supplier, orderReference: ref });
@@ -163,7 +189,7 @@ function result(interpretation: AIInterpretation, document: { type: DocumentType
 }
 
 /** Rules for a plain message. Exported for tests. */
-export function interpretText(text: string, today: string, suppliers: string[], conversation?: AIConversationContext): AIInterpretation {
+export function interpretText(text: string, today: string, suppliers: string[], conversation?: AIConversationContext, materials: AIProjectContext["materials"] = []): AIInterpretation {
   const t = normalizeText(text);
   const supplier = supplierMention(text, suppliers);
   const ref = orderReference(text);
@@ -176,7 +202,7 @@ export function interpretText(text: string, today: string, suppliers: string[], 
     return { intent: "allocate_payment", ...base, supplier, orderReference: ref, amount: parseAmountText(text) };
   }
   if (isQuestion) {
-    const q = question(text, suppliers);
+    const q = question(text, suppliers, conversation, materials);
     return { intent: "ask_project_question", ...base, confidence: q.query === "general" ? 0.4 : 0.9, ...q };
   }
   if (/\bpag(amos|ue|o|aron|ado|ar|alo|ala)\b|transferi|abonamos|deposit/.test(t)) {
@@ -270,8 +296,10 @@ export function interpretDocument(fileName: string, body: string, userText: stri
   const ref = orderReference(combined);
   const fecha = /fecha:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i.exec(body);
   const date = fecha ? parseDate(fecha[1]!, today) : parseDate(`${userText ?? ""}`, today);
-  const itemText = lines.filter((l) => /^\s*\d/.test(l)).join("\n");
-  const items = itemText ? parseItems(itemText, supplier) : [];
+  const itemLines = lines.filter((l) => /^\s*\d/.test(l));
+  const items = itemLines.length ? parseItems(itemLines.join("\n"), supplier) : [];
+  // One item per printed line: its first amount is the unit price.
+  const linePrices = items.length === itemLines.length ? itemLines.map((l) => /\$\s*([\d.]+(?:,\d{1,2})?)/.exec(l)?.[1] ?? null) : null;
   const base = { confidence: doc.confidence, note: null };
   if (doc.type === "delivery") {
     if (!items.length) return result({ intent: "complete_order_delivery", ...base, orderReference: ref, supplier, deliveryReference: remitoNumber(combined), date }, doc);
@@ -308,7 +336,7 @@ export function interpretDocument(fileName: string, body: string, userText: stri
       doc,
     );
   }
-  const priced = items.map((it) => ({ ...it, unitPrice: priceFor(lines, it.material) }));
+  const priced = items.map((it, i) => ({ ...it, unitPrice: linePrices ? (linePrices[i] ? cleanNumber(linePrices[i]!) : null) : priceFor(lines, it.material) }));
   const total = /total[^\d$]*\$?\s*([\d.]+(?:,\d{1,2})?)/i.exec(body);
   return result(
     {
@@ -333,7 +361,7 @@ export class MockAIProvider implements AIProvider {
   readonly configured = true;
 
   async interpret(input: AIInterpretationInput): Promise<AIInterpretationResult> {
-    return result(interpretText(input.text, input.project.today, input.project.suppliers, input.conversation));
+    return result(interpretText(input.text, input.project.today, input.project.suppliers, input.conversation, input.project.materials));
   }
 
   async analyzeDocument(input: AIDocumentInput): Promise<AIInterpretationResult> {

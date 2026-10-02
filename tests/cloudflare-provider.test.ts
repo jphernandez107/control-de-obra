@@ -128,3 +128,20 @@ describe("CloudflareDocumentContentExtractor", () => {
     expect(await codeOf(extractor.extract(doc("application/pdf")))).toBe("AI_DOCUMENT_CONVERSION_FAILED");
   });
 });
+
+describe("material questions through Workers AI tool calls", () => {
+  it("answers the asked material fact from the database, with the model only classifying", async () => {
+    // The model calls ask_project_question with a material metric; figures come from the seed's order lines.
+    const ai = binding(async () => toolCall("ask_project_question", { confidence: 0.9, query: "get_material_order_summary", material: "hierro del 12", metric: "ordered_quantity" }));
+    const env = await setup({ ai: new CloudflareAIProvider({ binding: ai, model: MODEL }) });
+    const r = await env.say("¿Cuántas barras del 12 se pidieron?");
+    const text = (r.reply.blocks?.[0] as Extract<AssistantBlock, { type: "text" }>).text;
+    expect(text).toMatch(/^Se pidieron 100 barras de Acero Ø12 de 12 m cada una\. Equivalen a 1\.200 m lineales\./);
+    expect(ai.calls).toHaveLength(1); // classification only: the answer is rendered by the application
+    const tools = (ai.calls[0] as { inputs: { tools: { function: { name: string; parameters: { properties: Record<string, unknown> } } }[] } }).inputs.tools;
+    const ask = tools.find((t) => t.function.name === "ask_project_question")!;
+    expect(Object.keys(ask.function.parameters.properties)).toEqual(expect.arrayContaining(["metric", "unit", "material"]));
+    const order = tools.find((t) => t.function.name === "propose_create_order")!;
+    expect(JSON.stringify(order.function.parameters)).toContain("unitSize");
+  });
+});

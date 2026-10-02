@@ -26,6 +26,8 @@ export const DEMO_PASSWORD = "casacordoba";
 export interface SeedOptions {
   /** Only project, users, units and catalog — no orders, deliveries or payments. */
   empty?: boolean;
+  /** Like production's bootstrap: project, users and units only (no suppliers or materials). */
+  bare?: boolean;
   now?: Date;
 }
 
@@ -47,6 +49,8 @@ export async function seedDatabase(db: AppDb, storage: DocumentStorage, options:
     db.insert(t.users).values({ id: engineer.userId, projectId, name: engineer.name, role: engineer.role, username: "marcelo", passwordHash, canLogin: true, createdAt: created }),
     ...UNITS.map((u) => db.insert(t.units).values(u).onConflictDoNothing()),
   ] as unknown as Parameters<AppDb["batch"]>[0]);
+
+  if (options.bare) return { projectId, today };
 
   const supplierIds: Record<string, string> = {};
   const materialIds: Record<string, string> = {};
@@ -355,6 +359,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const { LocalFileStorage } = await import("./storage/local");
   const config = loadConfig();
   const empty = process.argv.includes("--empty");
+  // --bare: like production's bootstrap (no suppliers or materials), to try imports on an empty catalog.
+  const bare = process.argv.includes("--bare");
   if (config.databaseUrl.startsWith("file:")) {
     const path = resolve(config.databaseUrl.slice(5));
     for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${path}${suffix}`, { force: true });
@@ -362,8 +368,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   rmSync(resolve(config.documentsDir), { recursive: true, force: true });
   const { db, client } = await openDatabase(config.databaseUrl);
   await migrateDatabase(db);
-  const result = await seedDatabase(db, new LocalFileStorage(config.documentsDir), { empty });
+  const result = await seedDatabase(db, new LocalFileStorage(config.documentsDir), { empty, bare });
   client.close();
-  console.log(`${empty ? "Proyecto vacío" : "Datos de demostración"} cargados (hoy: ${result.today}) en ${config.databaseUrl}`);
+  console.log(`${bare ? "Proyecto sin catálogo" : empty ? "Proyecto vacío" : "Datos de demostración"} cargados (hoy: ${result.today}) en ${config.databaseUrl}`);
   console.log(`Usuarios de demo: juan (administrador) y marcelo, contraseña «${DEMO_PASSWORD}».`);
 }

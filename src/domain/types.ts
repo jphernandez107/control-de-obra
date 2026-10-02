@@ -65,8 +65,14 @@ export interface OrderLine {
   materialId: ID;
   materialName: string;
   spec?: string;
+  /** Purchase quantity and unit as ordered (172 barras). */
   quantity: number;
   unit: string;
+  /** Size of one purchase unit when known (12 m per barra). */
+  unitSize?: { quantity: number; unit: string };
+  /** Derived equivalent of `quantity` (2.064 m). Secondary information only. */
+  equivalent?: { quantity: number; unit: string };
+  /** Price of one purchase unit. */
   unitPrice: number | null;
   amount: number | null;
   delivered: number;
@@ -114,10 +120,15 @@ export interface Payment {
 
 export interface DeliveryProgress {
   status: DeliveryStatus;
-  ordered: number;
-  delivered: number;
-  /** Shared unit when every line uses the same one, otherwise "u". */
-  unit: string;
+  /** Materials (order lines) in the order, and how many of them arrived complete. */
+  lines: number;
+  completeLines: number;
+  /** Deliveries (remitos) registered for the order. */
+  deliveries: number;
+  /** 0–100: average delivered share per line, so lines in different units are never added together. */
+  percent: number;
+  /** Ordered/delivered totals, only when every line uses the same unit (never bars + kilograms). */
+  sameUnit: { ordered: number; delivered: number; unit: string } | null;
   pendingLabel?: string;
 }
 
@@ -216,9 +227,14 @@ export interface MaterialSummary {
   category: string;
   unit: string;
   supplierName: string;
+  /** In `unit` (the material's base unit). Lines in other units are converted, or listed in `otherUnits`. */
   ordered: number;
   delivered: number;
   pendingDelivery: number;
+  /** Derived equivalent of `ordered` when every line has one (2.064 m for 172 barras of 12 m). */
+  equivalent?: { quantity: number; unit: string };
+  /** Ordered quantities that cannot be converted to `unit`, e.g. "50 m"; never added to `ordered`. */
+  otherUnits?: string;
   lastOrderDate: ISODate;
   computation: MaterialComputation | null;
 }
@@ -232,6 +248,8 @@ export interface MaterialOrderRow {
   ordered: number;
   delivered: number;
   cumulative: number;
+  /** Set when the line's unit cannot be converted to the material's unit: its figures are in this unit and not in `cumulative`. */
+  unit?: string;
 }
 
 export interface MaterialDeliveryRow {

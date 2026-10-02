@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { ClipboardList, Coins, Ellipsis, Hourglass, Paperclip, Truck, Wallet } from "lucide-react";
 import type { DocumentRef, OrderDetail } from "@/domain/types";
-import { formatDate, formatMoney, formatNumber, formatShortDate, paymentMethodLabel, purchaseModeLabel } from "@/domain/format";
+import { deliveryAmountLabel, formatDate, formatMoney, formatNumber, formatShortDate, paymentMethodLabel, purchaseModeLabel, purchaseSizeLabel } from "@/domain/format";
 import { ActivityItem } from "@/components/domain/ActivityItem";
 import { DocumentPreview } from "@/components/domain/DocumentPreview";
 import { RegisterDeliverySheet, RegisterPaymentSheet } from "@/components/domain/RecordSheets";
@@ -113,7 +113,7 @@ export function OrderDetailPage() {
     void assistant.send({ text: `Imputar el pago sin imputar de ${order.supplier.name} al pedido ${order.number}` });
     navigate({ to: "/" });
   };
-  const deliveredPct = order.delivery.ordered ? (order.delivery.delivered / order.delivery.ordered) * 100 : 0;
+  const deliveredPct = order.delivery.percent;
   const lastDelivery = order.deliveries[0];
   const lastPayment = order.payments[0];
   const docMeta = (d: DocumentRef) => (d.kind === "comprobante_pedido" ? documentKindLabel[d.kind] : `${documentKindLabel[d.kind]} · ${formatShortDate(d.date)}`);
@@ -157,7 +157,7 @@ export function OrderDetailPage() {
                 <Truck size={16} className={order.delivery.status === "pendiente" ? "text-fg-2" : order.delivery.status === "entregado" ? "text-success" : "text-info"} />
                 <span className="flex-1 text-sm font-medium text-fg-2">{deliveryTitle(order)}</span>
                 <span className="font-mono text-base font-semibold text-fg">
-                  {formatNumber(order.delivery.delivered)} de {formatNumber(order.delivery.ordered)} {order.delivery.unit}
+                  {deliveryAmountLabel(order.delivery)}
                 </span>
               </div>
               <Progress value={deliveredPct} tone={deliveryTone(order)} />
@@ -187,7 +187,10 @@ export function OrderDetailPage() {
                 return (
                   <div key={l.id} className={cn("flex flex-col gap-2.5 p-3.5", i > 0 && "border-t border-border")}>
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-[15px] font-medium text-fg">{l.materialName}</span>
+                      <span className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[15px] font-medium text-fg">{l.materialName}</span>
+                        {l.unitSize ? <span className="font-mono text-xs text-fg-3">{purchaseSizeLabel(l)}</span> : null}
+                      </span>
                       <span className="font-mono text-[13px] text-fg-2">{l.amount === null ? "sin precio" : formatMoney(l.amount)}</span>
                     </div>
                     <div className="flex items-center gap-3">
@@ -308,7 +311,7 @@ export function OrderDetailPage() {
               <Dimension
                 icon={<Truck size={16} className={order.delivery.status === "pendiente" ? "text-fg-2" : "text-info"} />}
                 title="Entrega"
-                big={`${formatNumber(order.delivery.delivered)} de ${formatNumber(order.delivery.ordered)} ${order.delivery.unit}`}
+                big={deliveryAmountLabel(order.delivery)}
                 sub={`${Math.round(deliveredPct)}% entregado`}
                 pct={deliveredPct}
                 tone={deliveryTone(order)}
@@ -351,7 +354,7 @@ export function OrderDetailPage() {
                     <div key={l.id} className="flex h-[60px] items-center gap-4 border-t border-border px-4">
                       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                         <span className="text-sm font-medium text-fg">{l.materialName}</span>
-                        {l.spec ? <span className="text-xs text-fg-3">{l.spec}</span> : null}
+                        {l.unitSize ? <span className="text-xs text-fg-3">{purchaseSizeLabel(l)}</span> : l.spec ? <span className="text-xs text-fg-3">{l.spec}</span> : null}
                       </span>
                       <span className="w-20 text-right font-mono text-sm text-fg">
                         {formatNumber(l.quantity)} {l.unit}

@@ -1,4 +1,4 @@
-import type { ISODate, ISODateTime, PaymentMethod, PurchaseMode } from "./types";
+import type { DeliveryProgress, ISODate, ISODateTime, PaymentMethod, PurchaseMode } from "./types";
 
 const moneyFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 });
 const numberFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 3 });
@@ -95,6 +95,22 @@ export const purchaseModeLabel: Record<PurchaseMode, string> = {
 /** Unit labels that read better with a space and the plural form. */
 export function formatQuantity(value: number, unit: string): string {
   return `${formatNumber(value)} ${unit}`;
+}
+
+/**
+ * "20 de 60 barras" when every line shares a unit; otherwise counts materials
+ * ("0 de 5 materiales"), because bars and kilograms cannot be added.
+ */
+export function deliveryAmountLabel(d: DeliveryProgress): string {
+  if (d.sameUnit) return `${formatNumber(d.sameUnit.delivered)} de ${formatNumber(d.sameUnit.ordered)} ${d.sameUnit.unit}`;
+  return `${formatNumber(d.completeLines)} de ${pluralize(d.lines, "material", "materiales")}`;
+}
+
+/** "172 barras · 12 m c/u" (+ equivalent when asked). */
+export function purchaseSizeLabel(line: { unitSize?: { quantity: number; unit: string }; equivalent?: { quantity: number; unit: string } }, withEquivalent = true): string | undefined {
+  if (!line.unitSize) return undefined;
+  const size = `${formatNumber(line.unitSize.quantity)} ${line.unitSize.unit} c/u`;
+  return withEquivalent && line.equivalent ? `${size} · ${formatNumber(line.equivalent.quantity)} ${line.equivalent.unit}` : size;
 }
 
 /**

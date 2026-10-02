@@ -89,43 +89,122 @@ export interface MaterialCandidate {
   baseUnit: string;
 }
 
-const STEEL_WORDS = /\b(barras?|hierros?|acero|aceros|o\d|diametro|fi)\b/;
-const DIAMETERS = ["4.2", "4,2", "6", "8", "10", "12", "16", "20", "25"];
+// Construction Spanish for reinforcing steel: "hierro del 12", "barras de 10",
+// "acero 12 mm", "Ø12", "varilla del 8", "HIERRO DIAM.12 X BARRA 12 MT".
+// The diameter identifies the material; the bar length (12 m) does not.
+const STEEL_WORDS = /\b(barras?|hierros?|fierros?|aceros?|varillas?|adn|diam|diametro|fi|phi)\b|\bo\s?\d/;
+const NOT_A_BAR = /\b(mallas?|alambres?|clavos?|estribos?|chapas?|perfil(es)?|cano|canos|tubos?)\b/;
+const DIAMETERS = ["4.2", "6", "8", "10", "12", "16", "20", "25", "32"];
+const DIAMETER_NUMBER = String.raw`(\d{1,2}(?:[.,]\d)?)`;
+/** Lengths ("x barra 12 mt", "de 12 m", "12 metros") are removed before looking for a diameter. */
+const LENGTH = new RegExp(String.raw`(?:\bx\s*)?(?:\b(?:barras?|varillas?)\s*(?:de|x|por)?\s*)?\b\d{1,3}(?:[.,]\d{1,3})?\s*(?:m|mt|mts|mtr|mtrs|metros?)\b(?:\s*lineales?)?`, "g");
+
+export interface SteelSpec {
+  /** "12", "4.2" — null when the text names no diameter. */
+  diameter: string | null;
+  /** Words such as hierro/acero/barra/Ø appear. */
+  steel: boolean;
+  /** Reinforcing bar (not mesh, wire, nails…). */
+  bar: boolean;
+}
+
+function cleanDiameter(raw: string): string {
+  return raw.replace(",", ".");
+}
+
+/**
+ * Reads a steel diameter without confusing it with the bar length:
+ * "barra de 12" → Ø12, "barra de 12 m" → no diameter (a length),
+ * "HIERRO DIAM.12 X BARRA 12 MT" → Ø12.
+ */
+export function steelSpec(text: string): SteelSpec {
+  const t = normalizeText(text);
+  const steel = STEEL_WORDS.test(t);
+  const bar = steel && !NOT_A_BAR.test(t);
+  const rest = t.replace(LENGTH, " ");
+  const explicit =
+    /(?:^|[\s(])o\s?(\d{1,2}(?:[.,]\d)?)\b/.exec(rest) ?? // Ø12 (normalized to "o12")
+    new RegExp(String.raw`\b(?:diam|diametro|fi|phi)\.?\s*${DIAMETER_NUMBER}\b`).exec(rest) ??
+    new RegExp(String.raw`\b${DIAMETER_NUMBER}\s*mm\b`).exec(rest);
+  if (explicit) return { diameter: cleanDiameter(explicit[1]!), steel: true, bar: !NOT_A_BAR.test(t) };
+  if (!steel) return { diameter: null, steel, bar };
+  const loose =
+    new RegExp(String.raw`\b(?:hierros?|fierros?|aceros?|barras?|varillas?)\s*(?:del?|nro\.?|n)?\s*${DIAMETER_NUMBER}\b`).exec(rest) ??
+    new RegExp(String.raw`\b(?:del|de)\s+${DIAMETER_NUMBER}\b`).exec(rest);
+  const diameter = loose ? cleanDiameter(loose[1]!) : null;
+  return { diameter: diameter && DIAMETERS.includes(diameter) ? diameter : null, steel, bar };
+}
 
 /** "hierro del 12", "barras de 10", "acero 12 mm", "Ø12" → "12". */
 export function extractDiameter(mention: string): string | null {
-  const t = normalizeText(mention);
-  const direct = /\bo\s?(\d{1,2}(?:[.,]\d)?)\b/.exec(t);
-  if (direct) return direct[1]!.replace(",", ".");
-  if (!STEEL_WORDS.test(t)) return null;
-  const m = /\b(?:del|de|d)?\s*(\d{1,2}(?:[.,]\d)?)\s*(?:mm)?\b/.exec(t.replace(/^\d+\s+(?=barras?)/, ""));
-  if (m && DIAMETERS.includes(m[1]!)) return m[1]!.replace(",", ".");
-  return null;
+  return steelSpec(mention).diameter;
 }
 
-function materialDiameter(name: string): string | null {
-  const m = /\bo\s?(\d{1,2}(?:[.,]\d)?)\b/.exec(normalizeText(name));
-  return m ? m[1]!.replace(",", ".") : null;
+/** Canonical catalog name for a new material, so "HIERRO DIAM.12 X BARRA 12 MT" and "hierro del 12" both become "Acero Ø12". */
+export function canonicalMaterialName(description: string): { name: string; shortName: string; category?: string } {
+  const spec = steelSpec(description);
+  if (spec.bar && spec.diameter) {
+    const d = spec.diameter.replace(".", ",");
+    return { name: `Acero Ø${d}`, shortName: `Ø${d}`, category: "Hierros" };
+  }
+  const trimmed = description.replace(/\s+/g, " ").trim();
+  // Supplier printouts are often in capitals: "ALAMBRE NEGRO RECOCIDO" → "Alambre negro recocido".
+  const letters = trimmed.replace(/[^A-Za-zÁÉÍÓÚÑáéíóúñ]/g, "");
+  const name = letters && letters === letters.toUpperCase() ? trimmed.charAt(0) + trimmed.slice(1).toLowerCase() : trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  return { name, shortName: name };
+}
+
+const SYNONYMS: Record<string, string> = { hierro: "acero", fierro: "acero", varilla: "barra", kilo: "kg", kilogramo: "kg" };
+/** Words that say what kind of thing or unit, but not which material. */
+const GENERIC = new Set(["barra", "bolsa", "kg", "metro", "m", "mt", "mts", "lineal", "unidad", "u", "material", "materiale", "cosa", "eso", "esa", "esto", "ese", "o"]);
+
+function matchTokens(text: string): string[] {
+  return tokens(text).map((w) => SYNONYMS[w] ?? w);
+}
+
+/** True when the mention names no specific material ("barras", "el material", "eso"). */
+export function isGenericMaterialMention(mention: string): boolean {
+  if (steelSpec(mention).diameter) return false;
+  const words = matchTokens(mention).filter((w) => !/^\d/.test(w));
+  return words.every((w) => GENERIC.has(w) || w === "acero");
+}
+
+function materialSteel<T extends MaterialCandidate>(mat: T): SteelSpec {
+  const own = steelSpec(mat.name);
+  if (own.diameter) return own;
+  for (const alias of mat.aliases) {
+    const a = steelSpec(alias);
+    if (a.diameter && a.bar) return { ...a, bar: own.bar || a.bar };
+  }
+  return own;
 }
 
 export function matchMaterial<T extends MaterialCandidate>(mention: string, materials: T[]): MatchResult<T> {
   const m = normalizeText(mention);
   if (!m) return { status: "new", score: 0, candidates: [] };
-  const diameter = extractDiameter(m);
-  const mTokens = tokens(m);
+  const wanted = steelSpec(m);
+  const mTokens = matchTokens(m);
+  const distinctive = mTokens.filter((w) => !/^\d/.test(w) && !GENERIC.has(w));
   const scored = materials.map((mat) => {
     const names = [mat.name, mat.shortName, ...mat.aliases];
     let score = 0;
     for (const name of names) {
       const n = normalizeText(name);
       if (!n) continue;
-      if (n === m) score = Math.max(score, 1);
-      else score = Math.max(score, tokenScore(mTokens, tokens(n)) * 0.92);
+      if (n === m) {
+        score = Math.max(score, 1);
+        continue;
+      }
+      const nTokens = matchTokens(n);
+      score = Math.max(score, tokenScore(mTokens, nTokens) * 0.92);
+      // "alambre" → "Alambre de atar": every distinctive word of the mention is in the name.
+      if (!wanted.diameter && distinctive.length && distinctive.every((w) => nTokens.includes(w))) score = Math.max(score, 0.88);
     }
-    if (diameter) {
-      const d = materialDiameter(mat.name);
-      if (d === diameter && /acero|hierro|barra/.test(normalizeText(`${mat.name} ${mat.aliases.join(" ")}`))) score = Math.max(score, 0.95);
-      else if (d && d !== diameter) score = 0;
+    if (wanted.diameter) {
+      const own = materialSteel(mat);
+      if (own.diameter === wanted.diameter && own.steel && (own.bar || !wanted.bar)) score = Math.max(score, 0.95);
+      else if (own.diameter && own.diameter !== wanted.diameter) score = 0;
+      else if (!own.steel && wanted.bar) score = Math.min(score, 0.4);
     }
     return { item: mat, score };
   });

@@ -22,6 +22,8 @@
     "cf:migrate": "wrangler d1 migrations apply casa-cordoba --remote",
     "cf:bootstrap": "tsx server/bootstrap.ts",
     "cf:password": "tsx server/set-password.ts --remote",
+    "fix:units": "tsx --env-file-if-exists=.env server/fix-purchase-units.ts",
+    "cf:fix-units": "tsx server/fix-purchase-units.ts --remote",
     "cf:logs": "wrangler tail casa-cordoba"
   },
   "dependencies": {

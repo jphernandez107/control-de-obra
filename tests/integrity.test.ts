@@ -137,7 +137,7 @@ describe("business rules", () => {
     const rows = (pending.reply.blocks?.find((b) => b.type === "pending_deliveries") as any).rows.map((r: any) => r.orderNumber);
     expect(rows.sort()).toEqual(["0035", "38", "381", "A-1043"]);
     const qty = await env.say("¿Cuánto acero Ø12 llevamos pedido?");
-    expect((qty.reply.blocks?.[0] as any).text).toContain("Llevamos pedido 100 barras de Acero Ø12");
+    expect((qty.reply.blocks?.[0] as any).text).toMatch(/^Se pidieron 100 barras de Acero Ø12 de 12 m cada una\. Equivalen a 1\.200 m lineales\./);
     const comp = await env.say("¿Nos estamos pasando del cómputo?");
     expect((comp.reply.blocks?.[0] as any).text).toContain("Acero Ø12 supera el cómputo (111%");
     // Nothing was written by questions.
