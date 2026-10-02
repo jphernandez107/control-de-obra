@@ -4,13 +4,14 @@ import { z } from "zod";
 import type { AppDb } from "../db/client";
 import type { AIProvider } from "../ai/provider";
 import { LocalDocumentContentExtractor, type DocumentBytesSource, type DocumentContentExtractor } from "../ai/document-content";
+import { CachedDocumentContentExtractor } from "../ai/extraction-cache";
 import { listPendingActions } from "../ai/pending-actions";
 import { runProjectQuery } from "../ai/project-queries";
 import { PROJECT_QUERY_NAMES, type ProjectQueryName } from "../ai/schemas";
 import { DomainError } from "../domain/errors";
 import { toMilli } from "../domain/quantity";
 import type { DocumentStorage } from "../storage/storage";
-import { AssistantService } from "../services/assistant";
+import { AssistantService, type AssistantLimits } from "../services/assistant";
 import * as commands from "../services/commands";
 import { previewComputation, readComputationSheet } from "../services/computation-import";
 import type { CommandContext } from "../services/context";
@@ -32,6 +33,9 @@ export interface AppDeps {
   projectId: string;
   auth: AuthConfig;
   documentLimits?: DocumentLimits;
+  /** Reuse stored document readings (by content hash) instead of extracting again. */
+  cacheDocumentExtractions?: boolean;
+  assistantLimits?: AssistantLimits;
   now?: () => Date;
 }
 
@@ -137,8 +141,9 @@ export function createApp(deps: AppDeps) {
   const qctx = { db: deps.db, projectId: deps.projectId, now };
   // Document bytes are resolved here (storage + metadata); extractors only see this function.
   const documentBytes: DocumentBytesSource = async (doc) => readDocumentBytes(deps.storage, await getDocument(deps.db, deps.projectId, doc.id));
-  const extractor = (deps.documentExtractor ?? ((bytes) => new LocalDocumentContentExtractor(bytes)))(documentBytes);
-  const assistant = new AssistantService({ db: deps.db, projectId: deps.projectId, provider: deps.ai, extractor, storage: deps.storage, now });
+  const baseExtractor = (deps.documentExtractor ?? ((bytes) => new LocalDocumentContentExtractor(bytes)))(documentBytes);
+  const extractor = deps.cacheDocumentExtractions ? new CachedDocumentContentExtractor(deps.db, deps.projectId, baseExtractor, now) : baseExtractor;
+  const assistant = new AssistantService({ db: deps.db, projectId: deps.projectId, provider: deps.ai, extractor, storage: deps.storage, now, limits: deps.assistantLimits });
   const cmd = (c: Context<Env>, source: CommandContext["source"] = "manual"): CommandContext => ({ db: deps.db, projectId: deps.projectId, actor: c.get("actor"), source, now });
 
   const app = new Hono<Env>().basePath("/api");

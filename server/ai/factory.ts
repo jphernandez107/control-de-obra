@@ -10,8 +10,12 @@ import type { AIProvider, AIProviderId } from "./provider";
 
 export interface AIConfig {
   provider: AIProviderId;
-  /** Optional model id for providers that use one (AI_MODEL). */
+  /** Text model id for providers that use one (AI_TEXT_MODEL). */
   model?: string;
+  /** Vision model that reads photos of receipts (AI_VISION_MODEL). */
+  visionModel?: string;
+  /** Largest document handed to the provider for reading. */
+  maxDocumentBytes?: number;
   /** Cloudflare Workers AI binding (`env.AI`), when running on Workers. */
   cloudflareBinding?: unknown;
 }
@@ -40,7 +44,7 @@ export function getDocumentContentExtractor(config: AIConfig, bytes: DocumentByt
     case "mock":
       return new LocalDocumentContentExtractor(bytes);
     case "cloudflare":
-      return new CloudflareDocumentContentExtractor(bytes, { binding: config.cloudflareBinding });
+      return new CloudflareDocumentContentExtractor(bytes, { binding: config.cloudflareBinding, visionModel: config.visionModel, maxDocumentBytes: config.maxDocumentBytes });
     case "disabled":
       return new DisabledDocumentContentExtractor();
   }

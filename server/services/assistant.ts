@@ -1,11 +1,11 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
 import type { AssistantBlock, Attachment, ChatMessage, ConfirmResponse, ConfirmResult, Conversation, Interpretation } from "../../src/domain/assistant";
 import type { AppDb } from "../db/client";
 import * as t from "../db/schema";
 import { answerQuestion } from "../ai/answers";
 import { loadConversationContext, mergeRefs, type ContextRefs, type ConversationState } from "../ai/conversation-context";
 import type { DocumentContentExtractor } from "../ai/document-content";
-import { AI_ERROR_HINTS, AIError, isAIError, toAIError } from "../ai/errors";
+import { AI_ERROR_HINTS, AI_ERROR_MESSAGES, AIError, isAIError, toAIError } from "../ai/errors";
 import { validationColumns, withValidation } from "../ai/pending-actions";
 import type { AIProjectContext, AIProvider } from "../ai/provider";
 import { proposeAllocation, proposeDelivery, proposeOrder, proposePayment, resolvePaymentChoice, type ProposalResult } from "../ai/proposals";
@@ -33,6 +33,13 @@ export interface AssistantDeps {
   extractor: DocumentContentExtractor;
   storage: DocumentStorage;
   now: () => Date;
+  /** Per-user guard against bursts and double submissions, so a stuck button cannot drain the AI quota. */
+  limits?: AssistantLimits;
+}
+
+export interface AssistantLimits {
+  maxMessagesPerMinute: number;
+  duplicateWindowMs: number;
 }
 
 /** What one interpretation produced, before it is stored. */
@@ -47,6 +54,7 @@ interface Reply {
 type DocumentRow = typeof t.documents.$inferSelect;
 
 const CONFIRM_LABEL: Record<Interpretation["kind"], string> = { order: "Confirmar pedido", delivery: "Confirmar entrega", payment: "Confirmar pago" };
+const CONFIRM_LABELS = new Set(Object.values(CONFIRM_LABEL));
 const FOLLOW_UP: Record<Interpretation["kind"], string> = {
   order: "Listo. Cuando llegue el material, escríbeme algo como «llegaron las 20 barras del 12» o envíame la foto del remito.",
   delivery: "Listo, la entrega quedó registrada. El estado de pago no cambió.",
@@ -267,7 +275,7 @@ export class AssistantService {
     } catch (error) {
       // A document without readable text gets the "take another photo" card.
       if (doc && isAIError(error) && error.code === "AI_DOCUMENT_UNSUPPORTED" && error.message === "unreadable") return { blocks: [{ type: "read_error", fileName: doc.fileName }], documentId: doc.id };
-      if (doc && isAIError(error) && error.code === "AI_DOCUMENT_UNSUPPORTED") {
+      if (doc && isAIError(error) && error.code === "AI_DOCUMENT_UNSUPPORTED" && error.message === AI_ERROR_MESSAGES.AI_DOCUMENT_UNSUPPORTED) {
         return { blocks: aiErrorBlocks(new AIError("AI_DOCUMENT_UNSUPPORTED", `No puedo leer archivos ${doc.mimeType.split("/")[1]?.toUpperCase() ?? ""}.`)), documentId: doc.id };
       }
       return { blocks: aiErrorBlocks(error) };
@@ -364,10 +372,38 @@ export class AssistantService {
     );
   }
 
+  private async guardAIUse(actor: Actor, text: string, documentIds: string[], limits: AssistantLimits) {
+    const now = this.deps.now().getTime();
+    const recent = await this.db
+      .select({ id: t.chatMessages.id, text: t.chatMessages.text, createdAt: t.chatMessages.createdAt })
+      .from(t.chatMessages)
+      .innerJoin(t.conversations, eq(t.chatMessages.conversationId, t.conversations.id))
+      .where(
+        and(
+          eq(t.conversations.projectId, this.deps.projectId),
+          eq(t.chatMessages.authorUserId, actor.userId),
+          eq(t.chatMessages.role, "user"),
+          gt(t.chatMessages.createdAt, new Date(now - Math.max(60_000, limits.duplicateWindowMs)).toISOString()),
+        ),
+      );
+    const asked = recent.filter((m) => !CONFIRM_LABELS.has(m.text ?? ""));
+    if (asked.filter((m) => Date.parse(m.createdAt) > now - 60_000).length >= limits.maxMessagesPerMinute) {
+      throw new DomainError("rate_limited", "Enviaste muchos mensajes seguidos. Espera un minuto y vuelve a intentar.");
+    }
+    const sameText = asked.filter((m) => Date.parse(m.createdAt) > now - limits.duplicateWindowMs && (m.text ?? "") === text);
+    if (!sameText.length) return;
+    const attached = await this.db.select().from(t.messageAttachments).where(inArray(t.messageAttachments.messageId, sameText.map((m) => m.id)));
+    const key = [...documentIds].sort().join(",");
+    if (sameText.some((m) => attached.filter((a) => a.messageId === m.id).map((a) => a.documentId).sort().join(",") === key)) {
+      throw new DomainError("conflict", "Ese mensaje ya se envió hace un momento.");
+    }
+  }
+
   async send(actor: Actor, input: { conversationId?: string; text?: string; documentIds?: string[] }): Promise<{ conversationId: string; userMessage: ChatMessage; reply: ChatMessage }> {
     const text = input.text?.trim() ?? "";
     const documentIds = input.documentIds ?? [];
     if (!text && !documentIds.length) throw new DomainError("validation", "Escribe un mensaje o adjunta un comprobante.");
+    if (this.deps.limits) await this.guardAIUse(actor, text, documentIds, this.deps.limits);
     const documents = documentIds.length ? await this.db.select().from(t.documents).where(inArray(t.documents.id, documentIds.slice(0, 5))) : [];
     if (documents.some((d) => d.projectId !== this.deps.projectId) || documents.length !== documentIds.length) throw new DomainError("not_found", "El documento adjunto no existe.");
     const ledger = await this.ledger();

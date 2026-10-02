@@ -19,7 +19,7 @@ npm run dev               # API on :8787 + web on http://localhost:5173 (Vite pr
 
 Sign in as **`juan`** (administrator) or **`marcelo`**, password **`casacordoba`** (local demo data only).
 
-Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=mock`), so every flow works offline with no external AI service. Production runs with AI disabled until Cloudflare Workers AI is connected; see [docs/AI_HANDOFF.md](docs/AI_HANDOFF.md).
+Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=mock`), so every flow works offline with no external AI service. Production uses Cloudflare Workers AI on the free allocation; see [AI in production](#ai-in-production-workers-ai).
 
 | Script | What it does |
 | --- | --- |
@@ -36,7 +36,7 @@ Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=
 
 ### Environment
 
-See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file), `DOCUMENTS_DIR` (local document storage), `AI_PROVIDER` (`mock` \| `cloudflare` \| `disabled`; default `mock` locally), `AI_MODEL` (model id for the Cloudflare provider), `AUTH_MODE` (`session`, the default: login screen \| `dev`: no login, act as `DEV_USERNAME`), `SECURE_COOKIE`, `API_PORT`. Secrets are read only from the environment; `.env` is git-ignored.
+See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file), `DOCUMENTS_DIR` (local document storage), `AI_PROVIDER` (`mock` \| `cloudflare` \| `disabled`; default `mock` locally), `AI_TEXT_MODEL` / `AI_VISION_MODEL` (Workers AI models, production only), `AUTH_MODE` (`session`, the default: login screen \| `dev`: no login, act as `DEV_USERNAME`), `SECURE_COOKIE`, `API_PORT`. Secrets are read only from the environment; `.env` is git-ignored.
 
 ### Demo data
 
@@ -61,10 +61,10 @@ One Worker serves the built React app (Static Assets) and the API from one origi
 | Entry | `server/node.ts` (Hono on Node) | `server/worker.ts` (same Hono app) |
 | Database | SQLite file via libsql (`data/casa-cordoba.db`) | D1 `casa-cordoba`, binding `DB` |
 | Documents | `LocalFileStorage` (`data/documents/`) | private R2 bucket `casa-cordoba-documents`, binding `DOCUMENTS` (`server/storage/r2.ts`) |
-| AI | deterministic mock (`AI_PROVIDER=mock`) | **disabled** (`AI_PROVIDER=disabled`): the assistant answers «La función de IA todavía no está configurada.» `AI_PROVIDER=cloudflare` is accepted and becomes active once the Workers AI adapter is implemented ([handoff](docs/AI_HANDOFF.md)) |
+| AI | deterministic mock (`AI_PROVIDER=mock`) | Cloudflare Workers AI (`AI_PROVIDER=cloudflare`, binding `AI`, `server/ai/cloudflare.ts`), Free allocation only. See [AI in production](#ai-in-production-workers-ai) |
 | Identity | login screen (username + password), demo users from the seed | the same login screen; users and password hashes in D1 |
 
-Configuration lives in [`wrangler.jsonc`](wrangler.jsonc) (Worker `casa-cordoba`, bindings `DB`, `DOCUMENTS`, `ASSETS`, vars `AI_PROVIDER`, `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_DAY`, `MAX_DOCUMENTS_TOTAL_MB`). There are no secrets. Local development never talks to Cloudflare.
+Configuration lives in [`wrangler.jsonc`](wrangler.jsonc) (Worker `casa-cordoba`, bindings `DB`, `DOCUMENTS`, `ASSETS`, `AI`, vars `AI_PROVIDER`, `AI_TEXT_MODEL`, `AI_VISION_MODEL`, `AI_MAX_DOCUMENT_MB`, `AI_MAX_MESSAGES_PER_MINUTE`, `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_DAY`, `MAX_DOCUMENTS_TOTAL_MB`). There are no secrets. Local development never talks to Cloudflare.
 
 ### Deploy and operate
 
@@ -88,14 +88,14 @@ npm run cf:password -- usuario
 **Logins.** People sign in with a **username** and password on the app's login screen (no e-mails). Passwords are stored in D1 as salted PBKDF2-SHA256 hashes (`users.password_hash`). A login opens a session: an `HttpOnly`, `Secure`, `SameSite=Lax` cookie holding a random token, of which D1 stores only the SHA-256 (`sessions`). Sessions last 30 days and are extended while in use. «Cerrar sesión» is in the sidebar and on the Usuarios screen.
 
 - **Adding people:** the administrator (`juan`) opens **Usuarios** and enters name, username, password and role. Nobody else can see or use that screen. Users cannot change their own password.
-- **Setting or resetting a password** (also how `juan` gets his first one after migration 0002): `npm run cf:password -- juan` prompts for the password, hashes it on your machine and runs one `wrangler d1 execute` against the remote database. It also signs that user out everywhere.
+- **Setting or resetting a password** (also how `juan` gets his first one after migration 0003): `npm run cf:password -- juan` prompts for the password, hashes it on your machine and runs one `wrangler d1 execute` against the remote database. It also signs that user out everywhere.
 - **Guessing:** 10 failed attempts for a username lock it for 15 minutes. Use long passwords: anyone with the URL can try to log in.
 - PBKDF2 runs 10,000 iterations (~5 ms) to stay inside the Free plan's 10 ms CPU per request. The count is stored in each hash, so it can be raised later.
 
 **Upgrading from the HTTP Basic login** (one time, in this order):
 
 ```bash
-npm run cf:migrate                 # 0002: adds usernames/sessions, makes the owner `juan` (administrator), drops e-mails
+npm run cf:migrate                 # 0003: adds usernames/sessions, makes the owner `juan` (administrator), drops e-mails
 npm run cf:password -- juan        # juan's password for the new login screen
 npm run cf:deploy
 npx wrangler secret delete APP_USERS   # no longer read
@@ -127,6 +127,24 @@ Time Travel covers 7 days only; take a periodic `d1 export` to your own machine 
 - Errors return a generic Spanish message. Details only go to the Worker logs.
 - Security headers on every response: HSTS, CSP (`'self'` only), `nosniff`, `SAMEORIGIN` framing, same-origin referrer.
 
+### AI in production (Workers AI)
+
+The assistant calls Workers AI through the `AI` binding, server-side only. The browser never sees a key or a model response.
+
+| Use | Model (`wrangler.jsonc` var) | How |
+| --- | --- | --- |
+| Messages: classify and extract | `@cf/zai-org/glm-4.7-flash` (`AI_TEXT_MODEL`) | Tool calling: one tool per intent (`propose_create_order`, `propose_register_delivery`, `propose_complete_order_delivery`, `propose_supplier_payment`, `propose_order_payment`, `ask_project_question`, `request_clarification`, …). A tool call is only a proposal. It is validated by the app's Zod schemas, then shown as a card, and nothing is written until the user confirms |
+| PDFs | `env.AI.toMarkdown` | Free conversion. Scanned PDFs without a text layer come back empty, and the assistant asks for a photo |
+| Photos (JPG/PNG/WEBP/GIF) | `@cf/google/gemma-4-26b-a4b-it` (`AI_VISION_MODEL`) | One transcription call (text only, no interpretation), then the same text model as above |
+
+- **One model call per message** (two for a photo). No retries, no agent loops, reasoning turned off. Figures (balances, remaining quantities, amounts to pay) always come from D1, never from the model.
+- **Each document is read once.** The text is stored in `document_extractions`, keyed by the file's SHA-256, so re-sending the same file costs nothing.
+- **Limits:** AI document reading up to `AI_MAX_DOCUMENT_MB` (4 MB). Extracted text is capped at 12,000 characters. The chat context is the last 6 turns (280 characters each). The cap is `AI_MAX_MESSAGES_PER_MINUTE` (8) messages per user per minute, and the same message sent twice within 20 s is refused.
+- **Errors** are mapped in the adapter to the app's codes: quota, model unavailable, temporarily saturated, provider down, invalid response, unreadable or unsupported document. The user sees a Spanish message and nothing is saved.
+- **Prompts** are in `server/ai/prompts.ts`. `PROMPT_VERSION` is logged with every call.
+- **Change a model:** edit `AI_TEXT_MODEL` / `AI_VISION_MODEL` in `wrangler.jsonc` and run `npm run cf:deploy`. Only use models whose page has no "Workers Paid" requirement: Cloudflare marks those with `require_workers_paid` and refuses them on this plan. To turn AI off, set `AI_PROVIDER` to `disabled`.
+- **Usage:** dashboard → AI → Workers AI (neurons per day and per model). Each call is also logged with model, time and tokens (`npm run cf:logs`, or Workers → `casa-cordoba` → Logs).
+
 ## Cost / Free Tier
 
 Verified against the official Cloudflare documentation on **2026-10-02**. The account stays on **Workers Free**; nothing was upgraded.
@@ -138,6 +156,7 @@ Verified against the official Cloudflare documentation on **2026-10-02**. The ac
 | D1 (Free) | 5M rows read/day, 100k rows written/day, 500 MB per DB, 5 GB per account, 50 queries per request, Time Travel 7 days | Queries fail until 00:00 UTC | **No.** Hard limit |
 | Workers Logs | 200,000 events/day, 3-day retention | Sampled at 1% | No |
 | Custom Domain + certificate | Free on any plan for a zone already on Cloudflare (first-level subdomain, covered by the free Universal SSL certificate) | — | No |
+| Workers AI | 10,000 neurons/day, shared by all models. Measured here: about 30 neurons per message (GLM-4.7-Flash, ~4,600 input tokens) and about 5 per photo transcription (Gemma 4), so roughly 300 messages/day. PDF conversion is free | Calls fail with error 3036 until **00:00 UTC (21:00 in Córdoba)**. The assistant shows «La cuota gratuita de IA de hoy se agotó…» and the rest of the app keeps working | **No.** On Workers Free, usage above the allocation is refused, never billed. Only Workers Paid bills neurons ($0.011/1,000) |
 | **R2** (Standard) | 10 GB-month storage, 1M Class A (writes/lists), 10M Class B (reads) per month, egress free | **Billed automatically** ($0.015/GB-month, $4.50/M Class A, $0.36/M Class B) | **Yes.** R2 needs a payment method and has **no hard spending cap** |
 
 **R2 is the only usage-billed product in this deployment.** Safeguards:
@@ -145,9 +164,9 @@ Verified against the official Cloudflare documentation on **2026-10-02**. The ac
 - The bucket is private (no public bucket URL, no `r2.dev`). Only logged-in users can upload or read.
 - Application caps keep usage far below the free tier, even with a leaked password. 100 uploads/day ≈ 3,000 Class A ops/month, against 1M free. Total documents are capped at 2 GB, against 10 GB free. Reads happen only when someone opens a document, and are cached in the browser for 1 hour.
 - A **$1 budget alert** (Billing → Billable Usage) emails the owner on any usage-based spend. It is informational only: Cloudflare offers no hard cap for R2.
-- Not used: Workers Paid, Workers AI, AI Gateway, KV, Queues, Durable Objects, Zero Trust, custom domains, Logpush, Analytics Engine.
+- Not used: Workers Paid, AI Gateway, paid-only Workers AI models, external AI APIs (Anthropic, OpenAI, Gemini), KV, Queues, Durable Objects, Zero Trust, Logpush, Analytics Engine.
 
-**What to watch in the dashboard:** Billing → Billable Usage (should stay $0.00), R2 → `casa-cordoba-documents` → Metrics (storage and operations), Workers & Pages → `casa-cordoba` → Metrics (requests/day vs 100k), D1 → `casa-cordoba` → Metrics (rows read/written).
+**What to watch in the dashboard:** Billing → Billable Usage (should stay $0.00), AI → Workers AI (neurons/day vs 10,000), R2 → `casa-cordoba-documents` → Metrics (storage and operations), Workers & Pages → `casa-cordoba` → Metrics (requests/day vs 100k), D1 → `casa-cordoba` → Metrics (rows read/written).
 
 **Known free-tier pressure points.** None of these can create charges. They can make requests fail until the daily reset.
 
@@ -155,14 +174,14 @@ Verified against the official Cloudflare documentation on **2026-10-02**. The ac
 - The conversations drawer runs one query per conversation (up to 50). It may hit the 50-queries-per-request limit once there are ~45+ conversations.
 - 10 ms CPU per request: fine for the current data volume. Large XLSX imports are the heaviest operation; a login (PBKDF2) takes about 5 ms.
 
-Docs used: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) · [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) · [Static Assets billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) · [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) · [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) · [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/) · [R2 pricing](https://developers.cloudflare.com/r2/pricing/) · [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) · [Budget alerts](https://developers.cloudflare.com/billing/manage/budget-alerts/) · [Workers + Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) · [Zero Trust setup](https://developers.cloudflare.com/cloudflare-one/setup/)
+Docs used: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) · [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) · [Static Assets billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) · [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) · [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) · [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/) · [R2 pricing](https://developers.cloudflare.com/r2/pricing/) · [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) · [Budget alerts](https://developers.cloudflare.com/billing/manage/budget-alerts/) · [Workers + Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) · [Zero Trust setup](https://developers.cloudflare.com/cloudflare-one/setup/) · [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) · [Workers AI errors](https://developers.cloudflare.com/workers-ai/platform/errors/) · [Workers AI limits](https://developers.cloudflare.com/workers-ai/platform/limits/) · [Markdown conversion](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/) · [GLM-4.7-Flash](https://developers.cloudflare.com/workers-ai/models/glm-4.7-flash/) · [Gemma 4 26B](https://developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it/)
 
 ## Stack
 
 - **Web**: React 19 · TypeScript · Vite · TanStack Router/Query · Tailwind CSS v4 (unchanged UI)
 - **API**: Hono (runs on Node via `@hono/node-server`, and on Cloudflare Workers unchanged)
 - **Data**: Drizzle ORM · SQLite (libsql locally) · migrations in `drizzle/` (D1-compatible SQL)
-- **AI**: provider-independent interface (`AIProvider`, `DocumentContentExtractor`), validated intents (Zod), deterministic `MockAIProvider`, Cloudflare Workers AI integration point (not connected yet)
+- **AI**: provider-independent interface (`AIProvider`, `DocumentContentExtractor`), validated intents (Zod), deterministic `MockAIProvider`, Cloudflare Workers AI adapter (`server/ai/cloudflare.ts`)
 - **Tests**: Vitest, end-to-end through the HTTP app against a real SQLite file
 
 Architecture, domain rules and the Cloudflare migration path are described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

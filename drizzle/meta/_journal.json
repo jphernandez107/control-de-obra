@@ -19,8 +19,15 @@
     {
       "idx": 2,
       "version": "6",
-      "when": 1790976492962,
-      "tag": "0002_usernames_and_sessions",
+      "when": 1790974861626,
+      "tag": "0002_document_extractions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1790977239442,
+      "tag": "0003_usernames_and_sessions",
       "breakpoints": true
     }
   ]

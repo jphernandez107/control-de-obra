@@ -174,7 +174,7 @@ describe("user manager", () => {
   });
 });
 
-describe("migration 0002", () => {
+describe("migration 0003", () => {
   it("turns the existing owner into the administrator `juan` and drops e-mails", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cdo-mig-"));
     const client = createClient({ url: `file:${join(dir, "m.db")}` });
@@ -183,12 +183,13 @@ describe("migration 0002", () => {
     };
     await apply("0000_init.sql");
     await apply("0001_pending_ai_actions.sql");
+    await apply("0002_document_extractions.sql");
     const at = NOW.toISOString();
     await client.execute(`INSERT INTO projects (id, name, created_at) VALUES ('p', 'Casa', '${at}')`);
     await client.execute(`INSERT INTO users (id, project_id, name, role, email, can_login, created_at) VALUES ('owner', 'p', 'Juan', 'propietario', 'jp@example.com', 1, '${at}')`);
     await client.execute(`INSERT INTO users (id, project_id, name, role, email, can_login, created_at) VALUES ('eng', 'p', 'Marcelo', 'ingeniero', 'm@example.com', 1, '${at}')`);
     await client.execute(`INSERT INTO users (id, project_id, name, role, can_login, created_at) VALUES ('ref', 'p', 'Pedro', 'otro', 0, '${at}')`);
-    await apply("0002_usernames_and_sessions.sql");
+    await apply("0003_usernames_and_sessions.sql");
     const rows = (await client.execute("SELECT * FROM users ORDER BY id")).rows;
     expect(rows.map((r) => [r.id, r.username, r.is_admin, r.can_login, r.password_hash])).toEqual([
       ["eng", null, 0, 0, null],
