@@ -10,7 +10,10 @@ export interface ServerConfig {
   port: number;
   ai: AIConfig;
   authMode: AuthMode;
-  devUserEmail?: string;
+  /** `dev` mode only: the user to act as without logging in. */
+  devUsername?: string;
+  /** Secure (HTTPS-only) session cookie. Off by default locally (http://localhost). */
+  secureCookie: boolean;
   projectId?: string;
 }
 
@@ -21,8 +24,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: Number(env.API_PORT ?? env.PORT ?? 8787),
     // Local development defaults to the deterministic mock; no external AI service is ever called from Node.
     ai: { provider: parseAIProviderId(env.AI_PROVIDER, "mock"), model: env.AI_MODEL || undefined },
-    authMode: env.AUTH_MODE === "cloudflare-access" ? "cloudflare-access" : "dev",
-    devUserEmail: env.DEV_USER_EMAIL || undefined,
+    // The login screen is on by default, as in production; `AUTH_MODE=dev` skips it.
+    authMode: env.AUTH_MODE === "dev" ? "dev" : "session",
+    devUsername: env.DEV_USERNAME || undefined,
+    secureCookie: env.SECURE_COOKIE === "true",
     projectId: env.PROJECT_ID || undefined,
   };
 }

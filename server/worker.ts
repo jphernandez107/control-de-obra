@@ -4,20 +4,19 @@ import { drizzle } from "drizzle-orm/d1";
 import { getAIProvider, getDocumentContentExtractor, parseAIProviderId, type AIConfig } from "./ai/factory";
 import type { AppDb } from "./db/client";
 import * as schema from "./db/schema";
-import { basicAuthEmail, BASIC_REALM, parseBasicUsers, type AuthConfig } from "./http/auth";
+import type { AuthConfig } from "./http/auth";
 import { createApp } from "./http/app";
 import { R2Storage, UnavailableStorage } from "./storage/r2";
 
 // Cloudflare Workers entry: D1 + R2 + static assets (the Vite build) on one
-// origin. Every request, including the SPA shell, passes the login gate
-// first (`run_worker_first`), so nothing is served anonymously.
+// origin. The app shell is public (it holds no data) and shows the login
+// screen; every `/api` route except login/logout needs a session cookie.
+// All responses, assets included, pass through here for the security headers.
 
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   DOCUMENTS?: R2Bucket;
-  /** Secret: `{"email": "sha256 hex of the password", …}`. */
-  APP_USERS?: string;
   /** mock | cloudflare | disabled (default). */
   AI_PROVIDER?: string;
   AI_MODEL?: string;
@@ -45,12 +44,8 @@ function withSecurityHeaders(response: Response): Response {
   return res;
 }
 
-function jsonError(status: number, code: string, message: string, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify({ error: { code, message } }), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
-}
-
-function unauthorized(): Response {
-  return jsonError(401, "unauthorized", "Inicia sesión para continuar.", { "www-authenticate": `Basic realm="${BASIC_REALM}", charset="UTF-8"` });
+function jsonError(status: number, code: string, message: string): Response {
+  return new Response(JSON.stringify({ error: { code, message } }), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 }
 
 function intEnv(value: string | undefined, fallback: number): number {
@@ -68,7 +63,7 @@ async function buildApp(env: Env): Promise<App | null> {
     ? await db.select().from(schema.projects).where(eq(schema.projects.id, env.PROJECT_ID))
     : await db.select().from(schema.projects).limit(1);
   if (!project) return null;
-  const auth: AuthConfig = authConfig(env);
+  const auth: AuthConfig = { mode: "session", secureCookie: true };
   const aiConfig: AIConfig = { provider: parseAIProviderId(env.AI_PROVIDER, "disabled"), model: env.AI_MODEL || undefined, cloudflareBinding: env.AI };
   const ai = getAIProvider(aiConfig);
   const app = createApp({
@@ -88,18 +83,9 @@ async function buildApp(env: Env): Promise<App | null> {
   return app;
 }
 
-// Only `basic` is supported here: trusting an Access e-mail header without
-// validating the Access JWT would let anyone spoof it.
-function authConfig(env: Env): AuthConfig {
-  return { mode: "basic", basicUsers: parseBasicUsers(env.APP_USERS) };
-}
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     void ctx;
-    const auth = authConfig(env);
-    if (auth.mode === "basic" && !(await basicAuthEmail(request.headers, auth.basicUsers ?? {}))) return withSecurityHeaders(unauthorized());
-
     const url = new URL(request.url);
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
       try {

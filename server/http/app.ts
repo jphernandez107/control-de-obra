@@ -13,10 +13,11 @@ import type { DocumentStorage } from "../storage/storage";
 import { AssistantService } from "../services/assistant";
 import * as commands from "../services/commands";
 import { previewComputation, readComputationSheet } from "../services/computation-import";
-import type { Actor, CommandContext } from "../services/context";
+import type { CommandContext } from "../services/context";
 import { getDocument, MAX_DOCUMENT_BYTES, readDocumentBytes, storeDocument, type DocumentLimits } from "../services/documents";
 import * as queries from "../services/queries";
-import { resolveActor, type AuthConfig } from "./auth";
+import { createUser, listUsers } from "../services/users";
+import { clearedSessionCookie, login, logout, resolveActor, sessionCookie, type AuthConfig, type SessionUser } from "./auth";
 
 // HTTP transport only: parse/validate input, resolve the actor, call a
 // service, map errors. No business rules live here. Runs unchanged on Node
@@ -34,7 +35,10 @@ export interface AppDeps {
   now?: () => Date;
 }
 
-type Env = { Variables: { actor: Actor } };
+type Env = { Variables: { actor: SessionUser } };
+
+/** Routes reachable without a session. */
+const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout"]);
 
 const PaymentMethod = z.enum(["transferencia", "efectivo", "cheque", "otro"]);
 const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida");
@@ -102,6 +106,9 @@ const ComputationImportBody = z.object({
 });
 
 // Proposals are application-shaped; they are re-validated and re-resolved by the services.
+const LoginBody = z.object({ username: z.string().max(64), password: z.string().max(200) });
+const NewUserBody = z.object({ name: z.string(), username: z.string(), password: z.string(), role: z.string() });
+
 const InterpretationBody = z.object({ interpretation: z.object({ kind: z.enum(["order", "delivery", "payment"]) }).passthrough() });
 
 function milli(value: number, label: string): number {
@@ -147,7 +154,7 @@ export function createApp(deps: AppDeps) {
   });
 
   app.use("*", async (c, next) => {
-    c.set("actor", await resolveActor(deps.db, deps.projectId, deps.auth, c.req.raw.headers));
+    if (!PUBLIC_PATHS.has(c.req.path)) c.set("actor", await resolveActor(deps.db, deps.projectId, deps.auth, c.req.raw.headers, now()));
     await next();
   });
 
@@ -158,9 +165,39 @@ export function createApp(deps: AppDeps) {
   app.use("*", (c, next) => (c.req.path === "/api/documents" ? next() : jsonLimit(c, next)));
 
   // ---------------------------------------------------------------- session
+  app.post("/auth/login", async (c) => {
+    const { username, password } = await body(c, LoginBody);
+    const { token, user } = await login(deps.db, deps.projectId, username, password, now());
+    c.header("set-cookie", sessionCookie(token, deps.auth));
+    c.header("cache-control", "no-store");
+    return c.json({ user });
+  });
+
+  app.post("/auth/logout", async (c) => {
+    await logout(deps.db, c.req.raw.headers);
+    c.header("set-cookie", clearedSessionCookie(deps.auth));
+    return c.json({ ok: true });
+  });
+
   app.get("/session", async (c) => {
     const actor = c.get("actor");
+    c.header("cache-control", "no-store");
     return c.json({ today: await queries.projectToday(qctx), user: actor, ai: { provider: deps.ai.id, configured: deps.ai.configured, model: deps.ai.model ?? null } });
+  });
+
+  // ---------------------------------------------------------------- users (administrator only)
+  const requireAdmin = (c: Context<Env>) => {
+    if (!c.get("actor").isAdmin) throw new DomainError("forbidden", "Solo el administrador puede gestionar usuarios.");
+  };
+
+  app.get("/users", async (c) => {
+    requireAdmin(c);
+    return c.json(await listUsers(deps.db, deps.projectId));
+  });
+
+  app.post("/users", async (c) => {
+    requireAdmin(c);
+    return c.json(await createUser(deps.db, deps.projectId, await body(c, NewUserBody), now()), 201);
   });
 
   // ---------------------------------------------------------------- read-only project queries (no SQL surface)

@@ -1,5 +1,5 @@
-import { forwardRef, type InputHTMLAttributes, type ReactNode } from "react";
-import { ChevronDown, Search, X } from "lucide-react";
+import { forwardRef, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
+import { ChevronDown, Eye, EyeOff, Search, X } from "lucide-react";
 import { cn } from "./cn";
 
 export const SearchField = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & { onClear?: () => void; containerClassName?: string }>(
@@ -123,4 +123,40 @@ export function TextInput({ className, mono, ...rest }: InputHTMLAttributes<HTML
 
 export function FieldLabel({ children, className }: { children: ReactNode; className?: string }) {
   return <span className={cn("text-[13px] font-medium text-fg-2", className)}>{children}</span>;
+}
+
+/** Password field with a show/hide toggle (typing on a phone is error-prone). */
+export function PasswordInput({ className, ...rest }: Omit<InputHTMLAttributes<HTMLInputElement>, "type">) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <span className="relative flex">
+      <TextInput type={visible ? "text" : "password"} autoCapitalize="none" autoCorrect="off" spellCheck={false} className={cn("pr-12", className)} {...rest} />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        className="absolute inset-y-0 right-0 flex w-12 items-center justify-center text-fg-3 hover:text-fg"
+        aria-label={visible ? "Ocultar contraseña" : "Mostrar contraseña"}
+        title={visible ? "Ocultar contraseña" : "Mostrar contraseña"}
+      >
+        {visible ? <EyeOff size={18} /> : <Eye size={18} />}
+      </button>
+    </span>
+  );
+}
+
+export function SelectInput({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <span className="relative flex">
+      <select
+        className={cn(
+          "h-12 w-full appearance-none rounded-[10px] border border-border-strong bg-surface pr-10 pl-3.5 text-base text-fg outline-none focus:border-accent focus:ring-1 focus:ring-accent",
+          className,
+        )}
+        {...rest}
+      >
+        {children}
+      </select>
+      <ChevronDown size={16} className="pointer-events-none absolute top-1/2 right-3.5 -translate-y-1/2 text-fg-3" />
+    </span>
+  );
 }

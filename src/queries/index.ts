@@ -14,6 +14,7 @@ export const queryKeys = {
   activity: (filters: ActivityFilters) => ["activity", filters] as const,
   conversations: ["assistant", "conversations"] as const,
   session: ["session"] as const,
+  users: ["users"] as const,
   materialOptions: ["materials", "options"] as const,
   units: ["units"] as const,
 };
@@ -21,6 +22,43 @@ export const queryKeys = {
 export function useSession() {
   const { session } = useServices();
   return useQuery({ queryKey: queryKeys.session, queryFn: () => session.get(), staleTime: 5 * 60_000 });
+}
+
+export function useLogin() {
+  const { auth } = useServices();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { username: string; password: string }) => auth.login(v.username, v.password),
+    // Start from a clean cache: nothing from a previous user is kept.
+    onSuccess: () => qc.resetQueries(),
+  });
+}
+
+export function useLogout() {
+  const { auth } = useServices();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => auth.logout(),
+    onSettled: () => {
+      qc.clear();
+      // Back to a clean page (and the login screen) without anything from this session.
+      window.location.assign("/");
+    },
+  });
+}
+
+export function useUsers(enabled = true) {
+  const { users } = useServices();
+  return useQuery({ queryKey: queryKeys.users, queryFn: () => users.list(), enabled });
+}
+
+export function useCreateUser() {
+  const { users } = useServices();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (user: Parameters<typeof users.create>[0]) => users.create(user),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.users }),
+  });
 }
 
 export function useMaterialOptions() {

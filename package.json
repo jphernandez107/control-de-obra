@@ -15,11 +15,13 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=.env server/migrate.ts",
     "db:seed": "tsx --env-file-if-exists=.env server/seed.ts",
+    "user:password": "tsx --env-file-if-exists=.env server/set-password.ts",
     "samples": "tsx server/dev/samples.ts",
     "cf:dev": "npm run build && wrangler dev",
     "cf:deploy": "npm run build && wrangler deploy",
     "cf:migrate": "wrangler d1 migrations apply casa-cordoba --remote",
     "cf:bootstrap": "tsx server/bootstrap.ts",
+    "cf:password": "tsx server/set-password.ts --remote",
     "cf:logs": "wrangler tail casa-cordoba"
   },
   "dependencies": {

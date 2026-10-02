@@ -10,7 +10,7 @@
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    // The login gate must run before any file (including index.html) is served.
+    // Every response, assets included, passes through the Worker to get the security headers.
     "run_worker_first": true
   },
   "d1_databases": [

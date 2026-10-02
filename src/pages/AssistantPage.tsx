@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { LucideIcon } from "lucide-react";
 import { ArrowUpLeft, Bell, Boxes, Camera, ClipboardPlus, MessagesSquare, Sparkles, Truck, Wallet } from "lucide-react";
-import { formatWeekdayShort } from "@/domain/format";
+import { formatWeekdayShort, initialsOf } from "@/domain/format";
 import { attentionMeta } from "@/components/domain/AttentionRow";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
@@ -211,6 +211,9 @@ export function AssistantPage() {
         <Link to="/atencion" aria-label="Requiere atención" className="relative flex size-11 items-center justify-center rounded-full border border-border bg-surface text-fg">
           <Bell size={20} />
           {attention.length ? <span className="absolute top-2.5 right-2.5 size-2 rounded-full bg-ai ring-2 ring-surface" /> : null}
+        </Link>
+        <Link to="/usuarios" aria-label="Tu sesión" className="flex size-11 items-center justify-center">
+          <span className="flex size-9 items-center justify-center rounded-full bg-surface-2 text-xs font-semibold text-fg-2">{session.data ? initialsOf(session.data.user.name) : ""}</span>
         </Link>
       </header>
       {hasMessages && chips.length ? (

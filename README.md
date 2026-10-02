@@ -17,6 +17,8 @@ npm run db:seed           # creates ./data/casa-cordoba.db with demo data (re-ru
 npm run dev               # API on :8787 + web on http://localhost:5173 (Vite proxies /api)
 ```
 
+Sign in as **`juan`** (administrator) or **`marcelo`**, password **`casacordoba`** (local demo data only).
+
 Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=mock`), so every flow works offline with no external AI service. Production runs with AI disabled until Cloudflare Workers AI is connected; see [docs/AI_HANDOFF.md](docs/AI_HANDOFF.md).
 
 | Script | What it does |
@@ -25,15 +27,16 @@ Locally the assistant uses the deterministic **mock AI provider** (`AI_PROVIDER=
 | `npm run db:seed` | Resets the local database and documents, loads demo data. `npm run db:seed -- --empty` loads only the catalog (no orders, no computation) |
 | `npm run db:migrate` | Applies migrations in `drizzle/` |
 | `npm run db:generate` | Generates a new migration after editing `server/db/schema.ts` |
+| `npm run user:password -- <usuario>` | Sets or resets a user's password in the local database (prompts without echo) |
 | `npm test` | End-to-end scenarios and integrity tests (Vitest, real SQLite) |
 | `npm run typecheck` / `npm run build` | Type-check frontend + server / production build of the web app |
 | `npm run samples` | Regenerates the sample documents in `samples/` |
-| `npm run cf:migrate` / `cf:deploy` / `cf:logs` / `cf:bootstrap` | Cloudflare production — see [Production](#production-cloudflare) |
+| `npm run cf:migrate` / `cf:deploy` / `cf:logs` / `cf:bootstrap` / `cf:password` | Cloudflare production — see [Production](#production-cloudflare) |
 | `npm run cf:dev` | Builds and runs the Worker locally in `workerd` with a local D1/R2 (needs `.dev.vars`, see `.dev.vars.example`) |
 
 ### Environment
 
-See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file), `DOCUMENTS_DIR` (local document storage), `AI_PROVIDER` (`mock` \| `cloudflare` \| `disabled`; default `mock` locally), `AI_MODEL` (model id for the Cloudflare provider), `AUTH_MODE` (`dev` \| `cloudflare-access`), `DEV_USER_EMAIL`, `API_PORT`. Secrets are read only from the environment; `.env` is git-ignored.
+See [`.env.example`](.env.example). Main variables: `DATABASE_URL` (SQLite file), `DOCUMENTS_DIR` (local document storage), `AI_PROVIDER` (`mock` \| `cloudflare` \| `disabled`; default `mock` locally), `AI_MODEL` (model id for the Cloudflare provider), `AUTH_MODE` (`session`, the default: login screen \| `dev`: no login, act as `DEV_USERNAME`), `SECURE_COOKIE`, `API_PORT`. Secrets are read only from the environment; `.env` is git-ignored.
 
 ### Demo data
 
@@ -51,7 +54,7 @@ Try in the assistant: «Marcelo pidió 20 barras del 12 y 30 del 10 a Hierros C�
 
 ## Production (Cloudflare)
 
-One Worker serves the built React app (Static Assets) and the API from one origin: `https://obra.la-calandria.ar/` and `/api/...`. The hostname is a Worker Custom Domain on the owner's existing `la-calandria.ar` zone (Cloudflare Free plan, also used for Home Assistant). The Custom Domain owns only the `obra` DNS record, and its certificate is the zone's free edge certificate. The `workers.dev` address and preview URLs are disabled. Every request (including `index.html`) goes through the Worker first (`run_worker_first`) so nothing is served without logging in.
+One Worker serves the built React app (Static Assets) and the API from one origin: `https://obra.la-calandria.ar/` and `/api/...`. The hostname is a Worker Custom Domain on the owner's existing `la-calandria.ar` zone (Cloudflare Free plan, also used for Home Assistant). The Custom Domain owns only the `obra` DNS record, and its certificate is the zone's free edge certificate. The `workers.dev` address and preview URLs are disabled. Every request (including `index.html`) goes through the Worker first (`run_worker_first`) to get the security headers. The app shell is public and shows the login screen; all data is behind `/api`, which requires a session.
 
 | Piece | Local | Production |
 | --- | --- | --- |
@@ -59,9 +62,9 @@ One Worker serves the built React app (Static Assets) and the API from one origi
 | Database | SQLite file via libsql (`data/casa-cordoba.db`) | D1 `casa-cordoba`, binding `DB` |
 | Documents | `LocalFileStorage` (`data/documents/`) | private R2 bucket `casa-cordoba-documents`, binding `DOCUMENTS` (`server/storage/r2.ts`) |
 | AI | deterministic mock (`AI_PROVIDER=mock`) | **disabled** (`AI_PROVIDER=disabled`): the assistant answers «La función de IA todavía no está configurada.» `AI_PROVIDER=cloudflare` is accepted and becomes active once the Workers AI adapter is implemented ([handoff](docs/AI_HANDOFF.md)) |
-| Identity | fixed dev user | HTTP Basic login checked against the `APP_USERS` secret |
+| Identity | login screen (username + password), demo users from the seed | the same login screen; users and password hashes in D1 |
 
-Configuration lives in [`wrangler.jsonc`](wrangler.jsonc) (Worker `casa-cordoba`, bindings `DB`, `DOCUMENTS`, `ASSETS`, vars `AI_PROVIDER`, `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_DAY`, `MAX_DOCUMENTS_TOTAL_MB`). The only secret is `APP_USERS`. Local development never talks to Cloudflare.
+Configuration lives in [`wrangler.jsonc`](wrangler.jsonc) (Worker `casa-cordoba`, bindings `DB`, `DOCUMENTS`, `ASSETS`, vars `AI_PROVIDER`, `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_DAY`, `MAX_DOCUMENTS_TOTAL_MB`). There are no secrets. Local development never talks to Cloudflare.
 
 ### Deploy and operate
 
@@ -77,18 +80,28 @@ New schema changes: edit `server/db/schema.ts`, `npm run db:generate`, commit th
 **First-time bootstrap** (already done for this deployment — re-running it is a no-op once a project exists): creates the project, the people who can sign in and the unit table. No demo activity is loaded in production.
 
 ```bash
-npm run cf:bootstrap -- --project "Casa Córdoba" --user "Nombre|email|propietario"
+npm run cf:bootstrap -- --project "Casa Córdoba" --user "Nombre|usuario|propietario"   # the first user is the administrator
 npx wrangler d1 execute casa-cordoba --remote --file data/bootstrap.sql
+npm run cf:password -- usuario
 ```
 
-**Logins.** `APP_USERS` is a JSON object `{"email": "<sha256 hex of the password>"}`; only hashes are stored. Each email must also be a `users` row with `can_login = 1`. To add or change a password:
+**Logins.** People sign in with a **username** and password on the app's login screen (no e-mails). Passwords are stored in D1 as salted PBKDF2-SHA256 hashes (`users.password_hash`). A login opens a session: an `HttpOnly`, `Secure`, `SameSite=Lax` cookie holding a random token, of which D1 stores only the SHA-256 (`sessions`). Sessions last 30 days and are extended while in use. «Cerrar sesión» is in the sidebar and on the Usuarios screen.
+
+- **Adding people:** the administrator (`juan`) opens **Usuarios** and enters name, username, password and role. Nobody else can see or use that screen. Users cannot change their own password.
+- **Setting or resetting a password** (also how `juan` gets his first one after migration 0002): `npm run cf:password -- juan` prompts for the password, hashes it on your machine and runs one `wrangler d1 execute` against the remote database. It also signs that user out everywhere.
+- **Guessing:** 10 failed attempts for a username lock it for 15 minutes. Use long passwords: anyone with the URL can try to log in.
+- PBKDF2 runs 10,000 iterations (~5 ms) to stay inside the Free plan's 10 ms CPU per request. The count is stored in each hash, so it can be raised later.
+
+**Upgrading from the HTTP Basic login** (one time, in this order):
 
 ```bash
-printf %s 'the-new-password' | shasum -a 256          # → hash
-npx wrangler secret put APP_USERS                     # paste {"jphernandez107@gmail.com":"<hash>", …}
+npm run cf:migrate                 # 0002: adds usernames/sessions, makes the owner `juan` (administrator), drops e-mails
+npm run cf:password -- juan        # juan's password for the new login screen
+npm run cf:deploy
+npx wrangler secret delete APP_USERS   # no longer read
 ```
 
-The browser asks for email + password once per session (there is no logout button; closing the browser ends the session). Use long random passwords: anyone with the URL can try to log in.
+Until `cf:password` runs, nobody can sign in. Other people who could sign in before lose access (their passwords lived only in `APP_USERS`); add them again from Usuarios. Someone already named in records (e.g. «pedido por Marcelo») gets the login on that same person, so their history stays linked.
 
 **Restore D1 (Time Travel, included in Free, 7 days of history):**
 
@@ -102,10 +115,10 @@ Time Travel covers 7 days only; take a periodic `d1 export` to your own machine 
 
 ### Access model
 
-- One login gate in `server/worker.ts` for every path. Wrong or missing credentials → `401` (no data, no HTML).
-- The user behind the login is the actor written in the audit log.
+- One login check in the API for every `/api` route except login/logout. No session → `401` (no data). The app shell (HTML/JS/CSS) is public and holds no data.
+- The user behind the session is the actor written in the audit log.
 - Documents are only reachable through `/api/documents/:id/file` behind the same login. The bucket has no public URL or `r2.dev` access.
-- Cloudflare Access (Zero Trust) was evaluated and not used: it needs a payment method registered even for its free plan. It can replace the Basic login later. Validate the Access JWT (`ctx.access`) before trusting its identity.
+- Cloudflare Access (Zero Trust) was evaluated and not used: it needs a payment method registered even for its free plan. It could sit in front of the login screen later. Validate the Access JWT (`ctx.access`) before trusting its identity.
 
 ### Guardrails
 
@@ -121,7 +134,7 @@ Verified against the official Cloudflare documentation on **2026-10-02**. The ac
 | Product | Free allowance | When exceeded | Can it bill? |
 | --- | --- | --- | --- |
 | Workers (Free) | 100,000 requests/day, 10 ms CPU per request, 50 subrequests | Error 1027 / 429 until 00:00 UTC | **No.** Hard limit on the Free plan |
-| Static Assets | Unlimited, free. Here every asset request also runs the Worker (login gate), so it counts toward the 100k/day | — | No |
+| Static Assets | Unlimited, free. Here every asset request also runs the Worker (security headers), so it counts toward the 100k/day | — | No |
 | D1 (Free) | 5M rows read/day, 100k rows written/day, 500 MB per DB, 5 GB per account, 50 queries per request, Time Travel 7 days | Queries fail until 00:00 UTC | **No.** Hard limit |
 | Workers Logs | 200,000 events/day, 3-day retention | Sampled at 1% | No |
 | Custom Domain + certificate | Free on any plan for a zone already on Cloudflare (first-level subdomain, covered by the free Universal SSL certificate) | — | No |
@@ -140,7 +153,7 @@ Verified against the official Cloudflare documentation on **2026-10-02**. The ac
 
 - D1 rows read: each screen reads the whole project working set. A very large project (thousands of rows), viewed hundreds of times a day, could approach 5M rows/day.
 - The conversations drawer runs one query per conversation (up to 50). It may hit the 50-queries-per-request limit once there are ~45+ conversations.
-- 10 ms CPU per request: fine for the current data volume. Large XLSX imports are the heaviest operation.
+- 10 ms CPU per request: fine for the current data volume. Large XLSX imports are the heaviest operation; a login (PBKDF2) takes about 5 ms.
 
 Docs used: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) · [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) · [Static Assets billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/) · [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) · [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) · [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/) · [R2 pricing](https://developers.cloudflare.com/r2/pricing/) · [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) · [Budget alerts](https://developers.cloudflare.com/billing/manage/budget-alerts/) · [Workers + Access](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) · [Zero Trust setup](https://developers.cloudflare.com/cloudflare-one/setup/)
 
@@ -168,7 +181,7 @@ server/
                   conversation context,
                   answers (deterministic read queries), review (revise/confirm)
   storage/        DocumentStorage interface, LocalFileStorage (Node), MemoryStorage (tests)
-  http/           Hono app (transport only) and identity boundary
+  http/           Hono app (transport only) and identity boundary (passwords, sessions)
   node.ts         local server entry · seed.ts · migrate.ts · dev/ (catalog, PDF writer, samples)
 src/
   domain/         API contract types shared with the server, formatters

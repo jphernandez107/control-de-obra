@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AppDb } from "./db/client";
 import * as t from "./db/schema";
+import { hashPassword } from "./http/auth";
 import { CONVERSIONS, MATERIALS, SUPPLIERS, UNITS } from "./dev/catalog";
 import { simplePdf } from "./dev/pdf";
 import { addDays, localDate } from "./domain/time";
@@ -18,6 +19,9 @@ import type { DocumentStorage } from "./storage/storage";
 // are produced by the same code paths the app uses.
 
 const TZ = "America/Argentina/Cordoba";
+
+/** Password of the local demo users (`juan`, `marcelo`). Never used in production. */
+export const DEMO_PASSWORD = "casacordoba";
 
 export interface SeedOptions {
   /** Only project, users, units and catalog — no orders, deliveries or payments. */
@@ -35,10 +39,12 @@ export async function seedDatabase(db: AppDb, storage: DocumentStorage, options:
   const owner: Actor = { userId: newId(), name: "Juan Hernández", role: "propietario" };
   const engineer: Actor = { userId: newId(), name: "Marcelo Ríos", role: "ingeniero" };
 
+  // Local demo only: both demo users share DEMO_PASSWORD.
+  const passwordHash = await hashPassword(DEMO_PASSWORD);
   await db.batch([
     db.insert(t.projects).values({ id: projectId, name: "Casa Córdoba", timezone: TZ, currency: "ARS", createdAt: created }),
-    db.insert(t.users).values({ id: owner.userId, projectId, name: owner.name, role: owner.role, email: "juan@casacordoba.local", canLogin: true, createdAt: created }),
-    db.insert(t.users).values({ id: engineer.userId, projectId, name: engineer.name, role: engineer.role, email: "marcelo@casacordoba.local", canLogin: true, createdAt: created }),
+    db.insert(t.users).values({ id: owner.userId, projectId, name: owner.name, role: owner.role, username: "juan", passwordHash, canLogin: true, isAdmin: true, createdAt: created }),
+    db.insert(t.users).values({ id: engineer.userId, projectId, name: engineer.name, role: engineer.role, username: "marcelo", passwordHash, canLogin: true, createdAt: created }),
     ...UNITS.map((u) => db.insert(t.units).values(u).onConflictDoNothing()),
   ] as unknown as Parameters<AppDb["batch"]>[0]);
 
@@ -359,4 +365,5 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const result = await seedDatabase(db, new LocalFileStorage(config.documentsDir), { empty });
   client.close();
   console.log(`${empty ? "Proyecto vacío" : "Datos de demostración"} cargados (hoy: ${result.today}) en ${config.databaseUrl}`);
+  console.log(`Usuarios de demo: juan (administrador) y marcelo, contraseña «${DEMO_PASSWORD}».`);
 }

@@ -29,9 +29,18 @@ import type {
 // `services/api` implements them over the backend HTTP API.
 // Money values are integer minor units (centavos) everywhere.
 
+export interface SessionUser {
+  userId: ID;
+  name: string;
+  role: string;
+  username: string;
+  /** Can add users from the Usuarios screen. */
+  isAdmin: boolean;
+}
+
 export interface Session {
   today: ISODate;
-  user: { userId: ID; name: string; role: string };
+  user: SessionUser;
   /** AI provider id (mock | cloudflare | disabled) and whether it can serve requests. */
   ai: { provider: string; configured: boolean; model: string | null };
 }
@@ -185,8 +194,38 @@ export interface AssistantService {
   undo(recordId: ID, conversationId: ID | null): Promise<{ messages: ChatMessage[] }>;
 }
 
+export type UserRole = "propietario" | "ingeniero" | "otro";
+
+export interface UserAccount {
+  id: ID;
+  name: string;
+  username: string;
+  role: string;
+  isAdmin: boolean;
+  createdAt: string;
+}
+
+export interface NewUserAccount {
+  name: string;
+  username: string;
+  password: string;
+  role: UserRole;
+}
+
+export interface AuthService {
+  login(username: string, password: string): Promise<{ user: SessionUser }>;
+  logout(): Promise<void>;
+}
+
+export interface UsersService {
+  list(): Promise<UserAccount[]>;
+  create(user: NewUserAccount): Promise<UserAccount>;
+}
+
 export interface Services {
   session: { get(): Promise<Session> };
+  auth: AuthService;
+  users: UsersService;
   orders: OrdersService;
   suppliers: SuppliersService;
   deliveries: DeliveriesService;

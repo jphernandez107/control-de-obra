@@ -1,5 +1,7 @@
 # Copy to .dev.vars for `npm run cf:dev` (local workerd). Never commit .dev.vars.
-# Login for the local Worker: {"email": "<sha256 hex of the password>"}
-#   printf %s 'clave-local' | shasum -a 256
-APP_USERS={"prueba@local.test":"<sha256-hex>"}
+# Logins use usernames and password hashes stored in D1. For the local D1:
+#   npm run cf:bootstrap -- --user "Nombre|usuario|propietario"
+#   npx wrangler d1 migrations apply casa-cordoba --local
+#   npx wrangler d1 execute casa-cordoba --local --file data/bootstrap.sql
+#   npm run cf:password -- usuario --d1-local
 # AI_PROVIDER=mock

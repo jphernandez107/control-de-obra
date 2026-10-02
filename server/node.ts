@@ -26,7 +26,7 @@ const app = createApp({
   ai,
   documentExtractor: (bytes) => getDocumentContentExtractor(config.ai, bytes),
   projectId: project.id,
-  auth: { mode: config.authMode, devUserEmail: config.devUserEmail },
+  auth: { mode: config.authMode, devUsername: config.devUsername, secureCookie: config.secureCookie },
 });
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {

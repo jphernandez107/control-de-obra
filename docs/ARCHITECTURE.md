@@ -76,7 +76,9 @@ No external AI API is called by this codebase.
 
 ## Identity
 
-`server/http/auth.ts` resolves an `Actor` per request. `AUTH_MODE=dev` uses a fixed development user; `AUTH_MODE=cloudflare-access` maps the `Cf-Access-Authenticated-User-Email` header to a `users` row with `can_login`; `basic` (production) checks HTTP Basic credentials against password hashes held in a Worker secret. No passwords are stored in the database.
+`server/http/auth.ts` resolves the acting user per request. In `session` mode (local default and production) people sign in with a username and password (`POST /api/auth/login`). The password is checked against a salted PBKDF2-SHA256 hash in `users.password_hash`. Success sets an `HttpOnly`, `SameSite=Lax` cookie (`Secure` in production) with a random token; `sessions` stores only its SHA-256 with a 30-day expiry that is extended while in use. Every other `/api` route requires a valid session (401 otherwise); `POST /api/auth/logout` deletes it. Failed attempts are counted per username in `login_attempts` (10 in 15 minutes → 429). `users.is_admin` gates `GET/POST /api/users` (403 otherwise), which list people who can sign in and add new ones. `dev` mode skips the login and acts as `DEV_USERNAME` (used by most tests).
+
+The frontend wraps the app in `AuthGate`: a 401 from `/api/session` renders the login screen at the current URL, and any later 401 re-checks the session.
 
 ## Cloudflare deployment
 
@@ -84,10 +86,10 @@ Deployed as one Worker (`server/worker.ts`, config in `wrangler.jsonc`); see the
 
 - **D1**: `drizzle(env.DB, { schema })` from `drizzle-orm/d1` satisfies `AppDb`. Migrations are the same `drizzle/*.sql` files, applied with `wrangler d1 migrations apply` (tracked in `d1_migrations`; locally the libsql migrator tracks them in `__drizzle_migrations`). FKs are always enforced on D1.
 - **R2**: `R2Storage` (`server/storage/r2.ts`) implements `DocumentStorage`; without a `DOCUMENTS` binding, `UnavailableStorage` makes uploads fail with a Spanish message. Production passes `documentLimits` (size, uploads per day, total bytes) to `storeDocument`.
-- **Static assets**: the Vite build in `dist/`, SPA fallback via `not_found_handling: "single-page-application"`, `run_worker_first: true` so the login gate covers every path.
-- **Identity**: `AUTH_MODE` `basic` — `basicAuthEmail` checks the `Authorization` header against SHA-256 hashes in the `APP_USERS` secret; the e-mail must match a `users` row with `can_login`. The Worker accepts only this mode (a bare Access e-mail header would be spoofable without JWT validation).
+- **Static assets**: the Vite build in `dist/`, SPA fallback via `not_found_handling: "single-page-application"`, `run_worker_first: true` so every response gets the security headers.
+- **Identity**: `session` mode with `Secure` cookies; users and password hashes live in D1, so there are no secrets. Passwords are set from Usuarios (administrator) or with `npm run cf:password -- <usuario>`.
 - **AI**: `AI_PROVIDER=disabled` → `DisabledAIProvider`; the assistant shows «La función de IA todavía no está configurada. No se guardó nada.» and the composer shows the same notice. Connecting Workers AI means implementing the placeholders in `server/ai/cloudflare.ts`, adding the `AI` binding and setting `AI_PROVIDER=cloudflare` (see [AI_HANDOFF.md](AI_HANDOFF.md)).
-- **Bootstrap**: `server/bootstrap.ts` writes idempotent SQL for the project, login users and units only.
+- **Bootstrap**: `server/bootstrap.ts` writes idempotent SQL for the project, login users (by username; the first is the administrator) and units only.
 
 ## Known limitations
 
@@ -104,7 +106,7 @@ Deployed as one Worker (`server/worker.ts`, config in `wrangler.jsonc`); see the
 
 ## End-to-end scenarios verified
 
-Automated in `tests/` (`npm test`, 55 tests, real SQLite + HTTP app + mock provider), and checked in the browser with Playwright (every screen on desktop and mobile; the assistant, document, correction, delivery, payment and computation-import flows on desktop):
+Automated in `tests/` (`npm test`, 67 tests, real SQLite + HTTP app + mock provider), and checked in the browser with Playwright (every screen on desktop and mobile; the assistant, document, correction, delivery, payment and computation-import flows on desktop):
 
 | Scenario | Verified |
 | --- | --- |
@@ -122,4 +124,5 @@ Automated in `tests/` (`npm test`, 55 tests, real SQLite + HTTP app + mock provi
 | AI states | `disabled` and `cloudflare` (placeholder) → `AI_NOT_CONFIGURED`; quota → `AI_QUOTA_EXCEEDED`; outage → `AI_PROVIDER_UNAVAILABLE`; the rest of the API keeps serving |
 | Matching | «hierro del 12», «acero del 12», «barra Ø12», «acero 12 mm», «Ø12», «barras del 12» → Acero Ø12 (without aliases); «acero» → candidates; unknown supplier → new, not created |
 | Queries & context | read-only queries match seed figures and write nothing; «¿Cómo viene el pedido 38?» → «¿Y cuánto falta pagar?» answers $1.482.340; ambiguous follow-up asks «¿De qué pedido?»; «Llegó todo lo pendiente» / «Pagalo completo» use the focused order |
+| Login & users | every API route but login/logout needs a session; `juan` signs in by username (e-mails are not usernames); hardened cookie, only the token hash stored; wrong password and unknown user get the same message; logout and 30-day expiry with renewal; 10 failures lock for 15 minutes; only the administrator lists/adds users; a new user can sign in at once; Spanish validation; a person already named in records gets the login; migration 0002 makes the existing owner `juan` and drops e-mails |
 | Revalidation | pay-complete proposal refused as stale after a manual payment, refreshed amount confirmed; stale «todo lo pendiente» refreshed; blocked proposal (amount 0) cannot be confirmed; audit metadata `origin: "ai"` + `pendingActionId` |

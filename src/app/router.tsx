@@ -11,6 +11,7 @@ import { SupplierDetailPage } from "@/pages/SupplierDetailPage";
 import { MaterialsPage } from "@/pages/MaterialsPage";
 import { MaterialDetailPage } from "@/pages/MaterialDetailPage";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { UsersPage } from "@/pages/UsersPage";
 
 function NotFound() {
   return (
@@ -40,6 +41,7 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: "/materiales", component: MaterialsPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/materiales/$materialId", component: MaterialDetailPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/actividad", component: ActivityPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/usuarios", component: UsersPage }),
 ];
 
 const routeTree = rootRoute.addChildren(routes);

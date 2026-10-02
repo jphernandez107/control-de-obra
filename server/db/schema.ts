@@ -32,12 +32,43 @@ export const users = sqliteTable(
     projectId: text("project_id").notNull().references(() => projects.id),
     name: text("name").notNull(),
     role: text("role").notNull(), // propietario | ingeniero | otro
-    email: text("email"),
+    /** Login name (lower case). Null for people who are only referenced in records. */
+    username: text("username"),
+    /** `pbkdf2-sha256$<iterations>$<salt b64>$<hash b64>`; never the password itself. */
+    passwordHash: text("password_hash"),
     /** Whether this person can sign in (vs. only being referenced, e.g. "pedido por"). */
     canLogin: integer("can_login", { mode: "boolean" }).notNull().default(false),
+    /** Can add users from the Usuarios screen. */
+    isAdmin: integer("is_admin", { mode: "boolean" }).notNull().default(false),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex("users_email_uq").on(t.email)],
+  (t) => [uniqueIndex("users_username_uq").on(t.username)],
+);
+
+/** Login sessions. The cookie holds a random token; only its SHA-256 is stored. */
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    /** Hex SHA-256 of the session token. */
+    id: id(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    createdAt: createdAt(),
+    expiresAt: text("expires_at").notNull(),
+  },
+  (t) => [index("sessions_user_idx").on(t.userId)],
+);
+
+/** Failed sign-in attempts, used to slow down password guessing. */
+export const loginAttempts = sqliteTable(
+  "login_attempts",
+  {
+    id: id(),
+    username: text("username").notNull(),
+    at: text("at").notNull(),
+  },
+  (t) => [index("login_attempts_username_idx").on(t.username, t.at)],
 );
 
 export const units = sqliteTable("units", {

@@ -31,6 +31,16 @@ function startProgress(onProgress?: (title: string, steps: AnalysisStep[]) => vo
 export function createApiServices(): Services {
   return {
     session: { get: () => api.get("/session") },
+    auth: {
+      login: (username, password) => api.post("/auth/login", { username, password }),
+      logout: async () => {
+        await api.post("/auth/logout");
+      },
+    },
+    users: {
+      list: () => api.get("/users"),
+      create: (user) => api.post("/users", user),
+    },
     orders: {
       list: () => api.get("/orders"),
       getById: (id) => api.get(`/orders/${id}`),

@@ -17,7 +17,11 @@ export type DomainErrorCode =
   | "conflict"
   | "unsupported_document"
   | "stale_proposal"
-  | "persistence";
+  | "persistence"
+  | "unauthorized"
+  | "invalid_credentials"
+  | "too_many_attempts"
+  | "forbidden";
 
 const STATUS: Partial<Record<DomainErrorCode, number>> = {
   not_found: 404,
@@ -26,6 +30,10 @@ const STATUS: Partial<Record<DomainErrorCode, number>> = {
   unsupported_document: 415,
   stale_proposal: 409,
   persistence: 500,
+  unauthorized: 401,
+  invalid_credentials: 401,
+  too_many_attempts: 429,
+  forbidden: 403,
 };
 
 export class DomainError extends Error {

@@ -18,6 +18,13 @@ export class ApiError extends Error {
 
 const BASE = "/api";
 
+let unauthorizedHandler: (() => void) | null = null;
+
+/** Called when a request is rejected for lack of a session (not for a wrong password). */
+export function onUnauthorized(handler: () => void) {
+  unauthorizedHandler = handler;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
@@ -37,6 +44,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   } catch {
     json = undefined;
   }
+  if (res.status === 401 && path !== "/session" && path !== "/auth/login") unauthorizedHandler?.();
   if (!res.ok) {
     const err = (json as { error?: { code?: string; message?: string } & Record<string, unknown> } | undefined)?.error;
     throw new ApiError(res.status, err?.code ?? "http_error", err?.message ?? `El servidor respondió con un error (${res.status}).`, err);
