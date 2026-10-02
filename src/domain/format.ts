@@ -1,12 +1,18 @@
 import type { ISODate, ISODateTime, PaymentMethod, PurchaseMode } from "./types";
 
-const moneyFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2, minimumFractionDigits: 0 });
-const numberFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 1 });
+const moneyFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 });
+const numberFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 3 });
 
-/** `$1.482.340` — Argentine thousands separator, no currency code. */
-export function formatMoney(value: number, opts: { sign?: boolean } = {}): string {
+/**
+ * `$1.482.340` — Argentine thousands separator, no currency code.
+ * Takes integer minor units (centavos); the division happens only here, for display.
+ */
+export function formatMoney(minor: number, opts: { sign?: boolean } = {}): string {
+  const value = Math.round(minor);
   const abs = Math.abs(value);
-  const formatted = `$${moneyFormatter.format(abs)}`;
+  const whole = Math.trunc(abs / 100);
+  const cents = abs % 100;
+  const formatted = `$${moneyFormatter.format(whole)}${cents ? `,${String(cents).padStart(2, "0")}` : ""}`;
   if (value < 0) return `-${formatted}`;
   if (opts.sign && value > 0) return `+${formatted}`;
   return formatted;
@@ -89,6 +95,21 @@ export const purchaseModeLabel: Record<PurchaseMode, string> = {
 /** Unit labels that read better with a space and the plural form. */
 export function formatQuantity(value: number, unit: string): string {
   return `${formatNumber(value)} ${unit}`;
+}
+
+/**
+ * Parses what a user types in a money field ("$12.400", "1712,50", "500000")
+ * into minor units without floating point. Returns null when empty/invalid.
+ */
+export function parseMoneyInput(raw: string): number | null {
+  let text = raw.trim().replace(/[^\d.,]/g, "");
+  if (!text) return null;
+  if (text.includes(",")) text = text.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(text)) text = text.replace(/\./g, "");
+  const m = /^(\d+)(?:\.(\d{0,2})\d*)?$/.exec(text);
+  if (!m) return null;
+  const minor = Number(m[1]) * 100 + Number((m[2] ?? "").padEnd(2, "0"));
+  return Number.isSafeInteger(minor) ? minor : null;
 }
 
 export function initialsOf(name: string): string {

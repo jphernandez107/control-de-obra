@@ -7,6 +7,19 @@ export interface Attachment {
   sizeLabel: string;
   /** Object URL for local previews. */
   previewUrl?: string;
+  /** Stored document id once uploaded. */
+  documentId?: ID;
+  /** Served file URL once uploaded. */
+  url?: string;
+}
+
+/** How confidently a mention was matched to an existing catalog record. */
+export type MatchStatus = "matched" | "suggested" | "new";
+
+export interface MatchOption {
+  id: ID;
+  name: string;
+  unit?: string;
 }
 
 /** Field keys the assistant is unsure about and wants the user to verify. */
@@ -14,27 +27,44 @@ export type FlaggedField = string;
 
 export interface InterpretedOrderItem {
   id: ID;
+  /** Catalog material, or `null` to create a new one named `material` on confirm. */
+  materialId: ID | null;
   material: string;
+  /** Wording heard from the user/document ("barras del 12"). */
+  mention?: string;
+  match: MatchStatus;
+  /** Alternatives when the match is weak and needs the user to choose. */
+  candidates?: MatchOption[];
   spec?: string;
   quantity: number;
   unit: string;
+  /** Minor units. */
   unitPrice: number | null;
 }
 
 export interface OrderInterpretation {
   kind: "order";
+  /** Existing supplier, or `null` to create `supplierName` on confirm. */
+  supplierId: ID | null;
   supplierName: string;
+  supplierMatch: MatchStatus;
+  supplierCandidates?: MatchOption[];
+  /** External reference; empty when the supplier gave none. */
   number: string;
   date: ISODate;
   orderedBy: string;
   mode: PurchaseMode;
   items: InterpretedOrderItem[];
+  /** Total stated without line prices (minor units). */
+  statedTotal?: number | null;
+  notes?: string;
   document?: Attachment;
   flags: FlaggedField[];
 }
 
 export interface InterpretedDeliveryItem {
   orderLineId: ID;
+  materialId?: ID;
   material: string;
   unit: string;
   ordered: number;
@@ -44,6 +74,7 @@ export interface InterpretedDeliveryItem {
 
 export interface DeliveryInterpretation {
   kind: "delivery";
+  supplierId?: ID;
   supplierName: string;
   orderId: ID;
   orderNumber: string;
@@ -55,8 +86,12 @@ export interface DeliveryInterpretation {
 }
 
 export type PaymentAllocation =
+  /** Whole payment to one order (any excess over its balance stays unallocated). */
   | { type: "order"; orderId: ID; orderNumber: string }
-  | { type: "unallocated" };
+  /** Payment to the supplier's current account, no order. */
+  | { type: "unallocated" }
+  /** Explicit amounts per order; the remainder stays unallocated. */
+  | { type: "split"; parts: { orderId: ID; orderNumber: string; amount: number }[] };
 
 export interface PaymentInterpretation {
   kind: "payment";
@@ -72,8 +107,13 @@ export interface PaymentInterpretation {
     orderPendingAfter?: number;
     supplierBalanceBefore: number;
     supplierBalanceAfter: number;
+    /** Part that will stay unallocated (e.g. excess over the order balance). */
+    unallocatedAmount?: number;
     resultingTags?: StatusTag[];
   };
+  reference?: string;
+  /** Set when this proposal allocates an existing unallocated payment instead of creating one. */
+  existingPaymentId?: ID;
   document?: Attachment;
   flags: FlaggedField[];
 }
@@ -137,7 +177,7 @@ export type AssistantBlock =
       warning?: string;
       /** Resolved once the user continues. */
       resolved?: boolean;
-      context: { supplierId: ID; amount: number };
+      context: { supplierId: ID; amount: number; date?: ISODate; method?: PaymentMethod; documentId?: ID };
     }
   | { type: "read_error"; fileName: string }
   | {
@@ -173,6 +213,12 @@ export interface ChatMessage {
 export interface AssistantInput {
   text?: string;
   attachments?: Attachment[];
+}
+
+export interface ConfirmResponse {
+  result: ConfirmResult;
+  /** Messages the server appended to the conversation (echo + result card). */
+  messages: ChatMessage[];
 }
 
 export interface Conversation {

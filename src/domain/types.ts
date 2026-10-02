@@ -1,5 +1,10 @@
-// Frontend-facing domain types. The backend will own persistence and
-// derivations; these shapes describe what the UI needs to render.
+// API contract shared by the frontend and the backend (`server/`). The
+// backend owns persistence and derivations; these shapes describe what the
+// UI renders.
+//
+// Money: every amount is an integer in minor units (centavos, ARS) — never a
+// float. `formatMoney` divides by 100 only for display.
+// Quantities: plain numbers in the line's unit (stored exactly server-side).
 
 export type ID = string;
 /** Calendar date, `YYYY-MM-DD`. */
@@ -27,7 +32,10 @@ export interface Supplier extends SupplierRef {
 }
 
 export interface SupplierSummary extends Supplier {
+  /** Sum of the orders whose value is known. */
   totalOrdered: number;
+  /** Orders without a known value: the real balance may be higher than `balance`. */
+  unknownValueOrders: number;
   totalPaid: number;
   /** totalOrdered − every payment, including unallocated ones. */
   balance: number;
@@ -47,6 +55,9 @@ export interface DocumentRef {
   supplierId?: ID;
   orderId?: ID;
   orderNumber?: string;
+  mimeType?: string;
+  /** Download/preview URL served by the API. */
+  url?: string;
 }
 
 export interface OrderLine {
@@ -77,16 +88,28 @@ export interface Delivery {
   document?: DocumentRef;
 }
 
+export interface PaymentAllocationRef {
+  orderId: ID;
+  orderNumber: string;
+  amount: number;
+}
+
 export interface Payment {
   id: ID;
   supplierId: ID;
-  /** `null` = payment to the current account, not allocated to an order. */
+  /** Single allocated order, or `null` when unallocated or split across several. */
   orderId: ID | null;
   orderNumber?: string;
   date: ISODate;
   amount: number;
   method: PaymentMethod;
+  reference?: string;
   document?: DocumentRef;
+  allocations: PaymentAllocationRef[];
+  /** Part of the payment not applied to any order (reduces the supplier balance only). */
+  unallocatedAmount: number;
+  /** In an order context: the part of this payment applied to that order. */
+  allocatedToOrder?: number;
 }
 
 export interface DeliveryProgress {
@@ -123,6 +146,11 @@ export interface OrderSummary {
 }
 
 export interface OrderDetail extends OrderSummary {
+  /** External/supplier reference, if any (`number` falls back to the internal number). */
+  reference: string | null;
+  internalNumber: number;
+  /** Total stated by the supplier when line prices are unknown. */
+  statedTotal: number | null;
   orderedBy: string;
   orderedByRole?: string;
   mode: PurchaseMode;

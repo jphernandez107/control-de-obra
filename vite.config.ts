@@ -8,4 +8,8 @@ export default defineConfig({
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
+  server: {
+    // The API (server/node.ts) runs on its own port during development.
+    proxy: { "/api": `http://localhost:${process.env.API_PORT ?? 8787}` },
+  },
 });
