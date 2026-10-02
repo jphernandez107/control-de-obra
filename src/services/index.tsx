@@ -1,10 +1,9 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { Services } from "./types";
-import { createMockServices } from "./mock/services";
+import { createApiServices } from "./api/services";
 
-// Swap `createMockServices()` for an API-backed implementation of `Services`
-// when the backend exists; nothing else in the UI needs to change.
-export const defaultServices: Services = createMockServices();
+// Every screen reads and writes through these services, backed by the API.
+export const defaultServices: Services = createApiServices();
 
 const ServicesContext = createContext<Services>(defaultServices);
 

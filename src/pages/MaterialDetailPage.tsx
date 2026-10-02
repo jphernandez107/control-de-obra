@@ -14,6 +14,8 @@ import { EmptyState, ErrorState, Skeleton } from "@/components/ui/States";
 import { cn } from "@/components/ui/cn";
 import { useToast } from "@/components/ui/Toast";
 import { useAdjustComputation, useMarkReviewed, useMaterial } from "@/queries";
+import { parseQuantityInput } from "@/features/assistant/cards/parts";
+import { errorMessage } from "@/services/api/client";
 
 function statusTag(m: MaterialDetail) {
   const s = m.computation?.status;
@@ -62,7 +64,7 @@ export function MaterialDetailPage() {
       return {
         tone: "danger",
         icon: Flag,
-        text: `Revisar: el total pedido supera el cómputo en ${formatNumber(c.variation)} ${unit}. Puede ser material de reposición o un cómputo desactualizado${lastChange ? ` (última actualización: ${formatDate(lastChange.date)}, de ${formatNumber(lastChange.before)} a ${formatNumber(lastChange.after)} ${unit})` : ""}.`,
+        text: `Revisar: el total pedido supera el cómputo en ${formatNumber(c.variation)} ${unit}. Puede ser material de reposición o un cómputo desactualizado${lastChange ? ` (última actualización: ${formatDate(lastChange.date)}, ${lastChange.before === null ? `definido en ${formatNumber(lastChange.after)}` : `de ${formatNumber(lastChange.before)} a ${formatNumber(lastChange.after)}`} ${unit})` : ""}.`,
         mobile: `El total pedido supera el cómputo en ${formatNumber(c.variation)} ${unit}. Puede ser reposición o un cómputo desactualizado.`,
       };
     if (c.status === "cerca") return { tone: "warning", icon: Gauge, text: `Cerca del cómputo: ya se pidió el ${c.percent}%. Quedan ${formatNumber(c.remaining)} ${unit} según lo previsto.` };
@@ -259,8 +261,8 @@ export function MaterialDetailPage() {
             {m.computationChanges.length === 0 ? (
               <p className="text-[13px] text-fg-3">Sin cambios desde que se cargó.</p>
             ) : (
-              m.computationChanges.map((ch) => (
-                <div key={ch.date + ch.after} className="flex flex-col gap-2.5 lg:rounded-[14px] lg:border lg:border-border lg:bg-surface lg:p-4">
+              m.computationChanges.map((ch, i) => (
+                <div key={i} className="flex flex-col gap-2.5 lg:rounded-[14px] lg:border lg:border-border lg:bg-surface lg:p-4">
                   <span className="hidden items-center justify-between lg:flex">
                     <span className="text-sm font-medium text-fg">Cómputo actualizado</span>
                     <span className="font-mono text-xs text-fg-3">{formatDate(ch.date)}</span>
@@ -268,8 +270,8 @@ export function MaterialDetailPage() {
                   <span className="flex items-center gap-2">
                     <span className="font-mono text-xs text-fg-3 lg:hidden">{formatDate(ch.date)}</span>
                     <span className="rounded-[5px] bg-surface-2 px-[7px] py-0.5 font-mono text-xs text-fg-3">
-                      {formatNumber(ch.before)}
-                      <span className="hidden lg:inline"> {unit}</span>
+                      {ch.before === null ? "Sin cómputo" : formatNumber(ch.before)}
+                      {ch.before === null ? null : <span className="hidden lg:inline"> {unit}</span>}
                     </span>
                     <ArrowRight size={12} className="text-fg-3" />
                     <span className="rounded-[5px] bg-accent-soft px-[7px] py-0.5 font-mono text-xs font-semibold text-accent">
@@ -309,10 +311,14 @@ function AdjustSheet({ material, open, onClose }: { material: MaterialDetail; op
   const adjust = useAdjustComputation();
   const toast = useToast();
   const [value, setValue] = useState("");
+  const [reason, setReason] = useState("");
   useEffect(() => {
-    if (open) setValue(String(material.computation?.expected ?? material.ordered));
+    if (open) {
+      setValue(formatNumber(material.computation?.expected ?? material.ordered));
+      setReason("");
+    }
   }, [open, material]);
-  const n = Number(value.replace(/\D/g, "")) || 0;
+  const n = parseQuantityInput(value) ?? 0;
   const pct = n ? Math.round((material.ordered / n) * 100) : 0;
   return (
     <Sheet
@@ -329,12 +335,13 @@ function AdjustSheet({ material, open, onClose }: { material: MaterialDetail; op
           loading={adjust.isPending}
           onClick={() =>
             adjust.mutate(
-              { id: material.id, expected: n },
+              { id: material.id, expected: n, reason: reason.trim() || undefined },
               {
                 onSuccess: () => {
                   onClose();
                   toast("Cómputo actualizado");
                 },
+                onError: (error) => toast(errorMessage(error, "No se pudo guardar el cómputo."), "info"),
               },
             )
           }
@@ -346,7 +353,11 @@ function AdjustSheet({ material, open, onClose }: { material: MaterialDetail; op
       <div className="flex flex-col gap-4 pb-4">
         <label className="flex flex-col gap-1.5">
           <FieldLabel>Cantidad prevista ({material.unit})</FieldLabel>
-          <TextInput mono inputMode="numeric" value={value} onChange={(e) => setValue(e.target.value)} className="text-lg font-semibold" />
+          <TextInput mono inputMode="decimal" value={value} onChange={(e) => setValue(e.target.value)} className="text-lg font-semibold" />
+        </label>
+        <label className="flex flex-col gap-1.5">
+          <FieldLabel>Motivo (opcional)</FieldLabel>
+          <TextInput placeholder="Ej.: se sumaron las vigas del quincho" value={reason} onChange={(e) => setReason(e.target.value)} />
         </label>
         <div className="flex flex-col gap-2 rounded-[10px] bg-sunken p-3">
           <span className="flex justify-between text-[13px] text-fg-2">

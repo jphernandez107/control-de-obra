@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { ClipboardList, Coins, Ellipsis, Hourglass, Paperclip, Truck, Wallet } from "lucide-react";
 import type { DocumentRef, OrderDetail } from "@/domain/types";
@@ -6,6 +6,9 @@ import { formatDate, formatMoney, formatNumber, formatShortDate, paymentMethodLa
 import { ActivityItem } from "@/components/domain/ActivityItem";
 import { DocumentPreview } from "@/components/domain/DocumentPreview";
 import { RegisterDeliverySheet, RegisterPaymentSheet } from "@/components/domain/RecordSheets";
+import { EditOrderSheet } from "@/components/domain/EditOrderSheet";
+import { useServices } from "@/services";
+import { errorMessage } from "@/services/api/client";
 import { BackLink, Breadcrumb } from "@/components/layout/MobileHeader";
 import { Button, IconButton, LinkButton } from "@/components/ui/Button";
 import { DocChip, documentKindLabel } from "@/components/ui/DocChip";
@@ -14,8 +17,8 @@ import { Progress } from "@/components/ui/Progress";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/States";
 import { cn } from "@/components/ui/cn";
 import { useToast } from "@/components/ui/Toast";
-import { useOrder, useOrders } from "@/queries";
-import { useAssistant } from "@/features/assistant/AssistantProvider";
+import { useInvalidateAll, useOrder, useOrders } from "@/queries";
+import { isSupportedAttachment, useAssistant } from "@/features/assistant/AssistantProvider";
 
 function deliveryTone(o: OrderDetail) {
   return o.delivery.status === "entregado" ? "success" : "info";
@@ -45,7 +48,12 @@ export function OrderDetailPage() {
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [notes, setNotes] = useState<string | null>(null);
-  const [savedNotes, setSavedNotes] = useState<string | null>(null);
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const attachRef = useRef<HTMLInputElement>(null);
+  const services = useServices();
+  const invalidate = useInvalidateAll();
   const today = assistant.today;
 
   if (isPending) return <OrderDetailSkeleton />;
@@ -70,7 +78,37 @@ export function OrderDetailPage() {
 
   const supplierOrders = (orders.data?.orders ?? []).filter((o) => o.supplier.id === order.supplier.id && ((o.pendingPayment ?? 0) > 0 || o.id === order.id));
   const supplierBalance = (orders.data?.orders ?? []).filter((o) => o.supplier.id === order.supplier.id).reduce((s, o) => s + (o.pendingPayment ?? 0), 0) - order.supplierUnallocated;
-  const askToEdit = () => toast("Para corregir, cuéntale al asistente qué cambió", "info");
+  const askToEdit = () => setEditOpen(true);
+  const saveNotes = async (value: string) => {
+    setSavingNotes(true);
+    try {
+      await services.orders.correct(order.id, { notes: value.trim() || null });
+      await invalidate();
+      setNotes(null);
+      toast("Nota guardada");
+    } catch (error) {
+      toast(errorMessage(error, "No se pudo guardar la nota."), "info");
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+  const attachDocument = async (file: File) => {
+    if (!isSupportedAttachment(file)) {
+      toast("Formato no soportado. Adjunta un PDF o una foto.", "info");
+      return;
+    }
+    setAttaching(true);
+    try {
+      const uploaded = await services.documents.upload(file, "order_proof");
+      await services.orders.attachDocument(order.id, uploaded.id);
+      await invalidate();
+      toast("Comprobante adjuntado al pedido");
+    } catch (error) {
+      toast(errorMessage(error, "No se pudo adjuntar el documento."), "info");
+    } finally {
+      setAttaching(false);
+    }
+  };
   const allocateHere = () => {
     void assistant.send({ text: `Imputar el pago sin imputar de ${order.supplier.name} al pedido ${order.number}` });
     navigate({ to: "/" });
@@ -79,7 +117,7 @@ export function OrderDetailPage() {
   const lastDelivery = order.deliveries[0];
   const lastPayment = order.payments[0];
   const docMeta = (d: DocumentRef) => (d.kind === "comprobante_pedido" ? documentKindLabel[d.kind] : `${documentKindLabel[d.kind]} · ${formatShortDate(d.date)}`);
-  const notesValue = savedNotes ?? order.notes ?? "";
+  const notesValue = order.notes ?? "";
 
   const movements = [
     ...order.deliveries.map((d) => ({
@@ -93,8 +131,8 @@ export function OrderDetailPage() {
       id: p.id,
       date: p.date,
       kind: "pago" as const,
-      title: `Pago · ${formatMoney(p.amount)}`,
-      sub: `${paymentMethodLabel[p.method]} · imputado`,
+      title: `Pago · ${formatMoney(p.allocatedToOrder ?? p.amount)}`,
+      sub: `${paymentMethodLabel[p.method]} · imputado${p.allocatedToOrder !== undefined && p.allocatedToOrder < p.amount ? ` (de un pago de ${formatMoney(p.amount)})` : ""}`,
     })),
   ].sort((a, b) => b.date.localeCompare(a.date));
 
@@ -119,7 +157,7 @@ export function OrderDetailPage() {
                 <Truck size={16} className={order.delivery.status === "pendiente" ? "text-fg-2" : order.delivery.status === "entregado" ? "text-success" : "text-info"} />
                 <span className="flex-1 text-sm font-medium text-fg-2">{deliveryTitle(order)}</span>
                 <span className="font-mono text-base font-semibold text-fg">
-                  {formatNumber(order.delivery.delivered)} de {formatNumber(order.delivery.ordered)} u
+                  {formatNumber(order.delivery.delivered)} de {formatNumber(order.delivery.ordered)} {order.delivery.unit}
                 </span>
               </div>
               <Progress value={deliveredPct} tone={deliveryTone(order)} />
@@ -141,7 +179,7 @@ export function OrderDetailPage() {
           </div>
 
           <section className="flex flex-col gap-2.5">
-            <h2 className="text-base font-semibold text-fg">Materiales</h2>
+            <SectionHead title="Materiales" action={<LinkButton onClick={askToEdit}>Corregir</LinkButton>} />
             <div className="overflow-hidden rounded-xl border border-border bg-surface">
               {order.lines.map((l, i) => {
                 const pct = (l.delivered / l.quantity) * 100;
@@ -155,7 +193,7 @@ export function OrderDetailPage() {
                     <div className="flex items-center gap-3">
                       <Progress value={pct} tone={done ? "success" : "info"} className="flex-1" />
                       <span className={cn("font-mono text-sm font-medium", done ? "text-success" : "text-info")}>
-                        {formatNumber(l.delivered)} / {formatNumber(l.quantity)} u
+                        {formatNumber(l.delivered)} / {formatNumber(l.quantity)} {l.unit}
                       </span>
                     </div>
                   </div>
@@ -192,9 +230,9 @@ export function OrderDetailPage() {
           </section>
 
           <section className="flex flex-col gap-2.5">
-            <h2 className="text-base font-semibold text-fg">Documentos · {order.documents.length}</h2>
+            <SectionHead title={`Documentos · ${order.documents.length}`} action={<LinkButton onClick={() => attachRef.current?.click()}>{attaching ? "Subiendo…" : "+ Adjuntar"}</LinkButton>} />
             {order.documents.length === 0 ? (
-              <p className="text-sm text-warning">Sin comprobante de pedido. Envíalo al asistente para adjuntarlo.</p>
+              <p className="text-sm text-warning">Sin comprobante de pedido. Adjúntalo aquí o envíalo al asistente.</p>
             ) : (
               order.documents.map((d) => <DocChip key={d.id} fileName={d.fileName} meta={docMeta(d)} format={d.format} wide onClick={() => setPreview(d)} />)
             )}
@@ -243,8 +281,15 @@ export function OrderDetailPage() {
                 >
                   Copiar enlace
                 </button>
-                <button type="button" className="rounded-md px-3 py-2 text-left text-sm text-fg hover:bg-sunken" onClick={askToEdit}>
-                  Corregir con el asistente
+                <button
+                  type="button"
+                  className="rounded-md px-3 py-2 text-left text-sm text-fg hover:bg-sunken"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    askToEdit();
+                  }}
+                >
+                  Corregir pedido
                 </button>
               </div>
             ) : null}
@@ -263,7 +308,7 @@ export function OrderDetailPage() {
               <Dimension
                 icon={<Truck size={16} className={order.delivery.status === "pendiente" ? "text-fg-2" : "text-info"} />}
                 title="Entrega"
-                big={`${formatNumber(order.delivery.delivered)} de ${formatNumber(order.delivery.ordered)} u`}
+                big={`${formatNumber(order.delivery.delivered)} de ${formatNumber(order.delivery.ordered)} ${order.delivery.unit}`}
                 sub={`${Math.round(deliveredPct)}% entregado`}
                 pct={deliveredPct}
                 tone={deliveryTone(order)}
@@ -308,12 +353,18 @@ export function OrderDetailPage() {
                         <span className="text-sm font-medium text-fg">{l.materialName}</span>
                         {l.spec ? <span className="text-xs text-fg-3">{l.spec}</span> : null}
                       </span>
-                      <span className="w-20 text-right font-mono text-sm text-fg">{formatNumber(l.quantity)} u</span>
-                      <span className="flex w-40 items-center gap-2.5">
-                        <Progress value={(l.delivered / l.quantity) * 100} tone={done ? "success" : "info"} className="w-20" />
-                        <span className={cn("font-mono text-sm font-medium", l.delivered === 0 ? "text-fg-3" : done ? "text-success" : "text-info")}>{formatNumber(l.delivered)} u</span>
+                      <span className="w-20 text-right font-mono text-sm text-fg">
+                        {formatNumber(l.quantity)} {l.unit}
                       </span>
-                      <span className={cn("w-[84px] text-right font-mono text-sm", done ? "text-fg-3" : "font-semibold text-fg")}>{formatNumber(pending)} u</span>
+                      <span className="flex w-40 items-center gap-2.5">
+                        <Progress value={(l.delivered / l.quantity) * 100} tone={done ? "success" : "info"} className="w-16 shrink-0" />
+                        <span className={cn("font-mono text-sm font-medium whitespace-nowrap", l.delivered === 0 ? "text-fg-3" : done ? "text-success" : "text-info")}>
+                          {formatNumber(l.delivered)} {l.unit}
+                        </span>
+                      </span>
+                      <span className={cn("w-[84px] text-right font-mono text-sm", done ? "text-fg-3" : "font-semibold text-fg")}>
+                        {formatNumber(Math.max(pending, 0))} {l.unit}
+                      </span>
                       <span className="w-[100px] text-right font-mono text-sm text-fg-2">{l.unitPrice === null ? "—" : formatMoney(l.unitPrice)}</span>
                       <span className="w-[110px] text-right font-mono text-sm text-fg">{l.amount === null ? "—" : formatMoney(l.amount)}</span>
                     </div>
@@ -357,7 +408,7 @@ export function OrderDetailPage() {
                     icon={<Wallet size={16} />}
                     title={paymentMethodLabel[p.method]}
                     date={formatDate(p.date)}
-                    sub={`${formatMoney(p.amount)} imputado a este pedido`}
+                    sub={`${formatMoney(p.allocatedToOrder ?? p.amount)} imputado a este pedido${p.allocatedToOrder !== undefined && p.allocatedToOrder < p.amount ? ` · pago total ${formatMoney(p.amount)}` : ""}`}
                     doc={p.document}
                     onDoc={setPreview}
                   />
@@ -416,14 +467,7 @@ export function OrderDetailPage() {
                 title={`Documentos · ${order.documents.length}`}
                 small
                 action={
-                  <LinkButton
-                    onClick={() => {
-                      navigate({ to: "/" });
-                      toast("Adjunta el comprobante en el asistente", "info");
-                    }}
-                  >
-                    + Adjuntar
-                  </LinkButton>
+                  <LinkButton onClick={() => attachRef.current?.click()}>{attaching ? "Subiendo…" : "+ Adjuntar"}</LinkButton>
                 }
               />
               {order.documents.length === 0 ? (
@@ -464,14 +508,7 @@ export function OrderDetailPage() {
                     <Button variant="ghost" size="sm" onClick={() => setNotes(null)}>
                       Cancelar
                     </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => {
-                        setSavedNotes(notes);
-                        setNotes(null);
-                        toast("Nota guardada");
-                      }}
-                    >
+                    <Button size="sm" loading={savingNotes} onClick={() => void saveNotes(notes)}>
                       Guardar
                     </Button>
                   </div>
@@ -485,6 +522,18 @@ export function OrderDetailPage() {
       </div>
 
       <DocumentPreview doc={preview} onClose={() => setPreview(null)} />
+      <EditOrderSheet order={order} open={editOpen} onClose={() => setEditOpen(false)} />
+      <input
+        ref={attachRef}
+        type="file"
+        accept="image/*,application/pdf"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (file) void attachDocument(file);
+        }}
+      />
       <RegisterDeliverySheet order={order} open={deliveryOpen} onClose={() => setDeliveryOpen(false)} today={today} />
       <RegisterPaymentSheet
         open={paymentOpen}

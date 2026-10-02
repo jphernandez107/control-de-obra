@@ -240,6 +240,19 @@ describe("Scenario F · documents", () => {
     expect(order.documents.some((d: any) => d.id === docId)).toBe(true);
   });
 
+  it("suggests an order for a receipt without reference only on an exact balance match, flagged", async () => {
+    env = await setup();
+    const docId = await env.upload("transferencia_sanitarios.pdf", pdf(["Comprobante de transferencia", "Destinatario: Sanitarios del Centro", "Importe: $612.300", "Concepto: materiales"]), "application/pdf");
+    const r = await env.say("", [docId]);
+    const p = env.proposalOf(r.reply).interpretation as PaymentInterpretation;
+    expect(p.allocation).toMatchObject({ type: "order", orderNumber: "A-1043" });
+    expect(p.flags).toContain("allocation");
+    expect((await env.orderByNumber("A-1043")).payment.paid).toBe(0);
+    const other = await env.upload("transferencia_sanitarios_2.pdf", pdf(["Comprobante de transferencia", "Destinatario: Sanitarios del Centro", "Importe: $100.000"]), "application/pdf");
+    const r2 = await env.say("", [other]);
+    expect((env.proposalOf(r2.reply).interpretation as PaymentInterpretation).allocation).toEqual({ type: "unallocated" });
+  });
+
   it("turns an order proof into an order proposal with prices", async () => {
     env = await setup();
     const docId = await env.upload("nota_pedido_corralon.pdf", pdf(["NOTA DE PEDIDO N° 0041", "Corralón San Martín", "30 bolsas Cemento portland 50 kg $12.400", "4 m3 Arena gruesa $45.000"]), "application/pdf");
@@ -308,8 +321,8 @@ describe("Scenarios G and H · no computation, then a later computation", () => 
     const detail = await env.get(`/materials/${steel.id}`);
     expect(detail.computation).toMatchObject({ expected: 24, status: "dentro" });
     expect(detail.computationChanges.map((c: any) => [c.before, c.after])).toEqual([
-      [0, 18],
-      [24 - 6, 24],
+      [null, 18],
+      [18, 24],
     ]);
     const revisions = await env.db.select().from(t.computationRevisions);
     expect(revisions).toHaveLength(2);

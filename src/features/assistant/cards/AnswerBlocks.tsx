@@ -5,8 +5,6 @@ import { formatMoney, formatNumber } from "@/domain/format";
 import { Button } from "@/components/ui/Button";
 import { SplitProgress } from "@/components/ui/Progress";
 import { cn } from "@/components/ui/cn";
-import { useUploadComputation } from "@/queries";
-import { useToast } from "@/components/ui/Toast";
 
 export function AnalysisCard({ title, steps }: { title: string; steps: AnalysisStep[] }) {
   return (
@@ -160,7 +158,9 @@ export function BalanceBlock({ ordered, paid, balance, allocatedPaid, unallocate
             <span className={cn("text-sm font-medium", r.unallocated ? "text-ai" : "text-fg")}>{r.label}</span>
             <span className="text-xs text-fg-3">{r.description}</span>
           </span>
-          <span className={cn("font-mono text-sm font-medium", r.unallocated ? "text-ai" : "text-fg")}>{r.amount < 0 ? `−${formatMoney(-r.amount)}` : formatMoney(r.amount)}</span>
+          <span className={cn("font-mono text-sm font-medium", r.unallocated ? "text-ai" : r.amount === null ? "text-fg-3" : "text-fg")}>
+            {r.amount === null ? "A confirmar" : r.amount < 0 ? `−${formatMoney(-r.amount)}` : formatMoney(r.amount)}
+          </span>
         </button>
       ))}
     </div>
@@ -177,8 +177,7 @@ function Total({ label, value, className, large }: { label: string; value: strin
 }
 
 export function QuantitiesBlock({ rows, computationPrompt }: { rows: QuantityRow[]; computationPrompt: boolean }) {
-  const upload = useUploadComputation();
-  const toast = useToast();
+  const navigate = useNavigate();
   return (
     <div className="flex w-full flex-col gap-2.5">
       <div className="overflow-hidden rounded-xl border border-border bg-surface">
@@ -210,8 +209,7 @@ export function QuantitiesBlock({ rows, computationPrompt }: { rows: QuantityRow
             variant="secondary"
             icon={Upload}
             className="w-full"
-            loading={upload.isPending}
-            onClick={() => upload.mutate(undefined, { onSuccess: () => toast("Cómputo cargado: 10 materiales vinculados") })}
+            onClick={() => navigate({ to: "/materiales" })}
           >
             Cargar cómputo
           </Button>

@@ -13,9 +13,9 @@ import { SplitProgress } from "@/components/ui/Progress";
 import { Sheet } from "@/components/ui/Sheet";
 import { EmptyState, ErrorState, LoadingNote, Skeleton } from "@/components/ui/States";
 import { cn } from "@/components/ui/cn";
-import { useToast } from "@/components/ui/Toast";
 import { useOrders, useSuppliers } from "@/queries";
 import { useAssistant } from "@/features/assistant/AssistantProvider";
+import { csvMoney, downloadCsv } from "@/lib/csv";
 
 function normalize(t: string) {
   return t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -31,7 +31,6 @@ function mobileMeta(s: SupplierSummary) {
 
 export function SuppliersPage() {
   const navigate = useNavigate();
-  const toast = useToast();
   const assistant = useAssistant();
   const { data, isPending, isError, refetch, isRefetching } = useSuppliers();
   const orders = useOrders();
@@ -77,7 +76,7 @@ export function SuppliersPage() {
             </>
           ) : (
             <>
-              <Button variant="secondary" icon={Download} onClick={() => toast("La exportación estará disponible con el backend", "info")}>
+              <Button variant="secondary" icon={Download} onClick={() => downloadCsv("proveedores.csv", ["Proveedor", "Rubro", "Pedidos (importe conocido)", "Pedidos sin importe", "Pagado", "Saldo", "Sin imputar"], suppliers.map((x) => [x.name, x.category, csvMoney(x.totalOrdered), x.unknownValueOrders, csvMoney(x.totalPaid), csvMoney(x.balance), csvMoney(x.unallocatedPaid)]))}>
                 Exportar
               </Button>
               <Button icon={Wallet} onClick={() => setPickOpen(true)} disabled={!suppliers.length}>

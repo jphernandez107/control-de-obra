@@ -732,7 +732,7 @@ export class Ledger {
         const actor = this.s.users.find((u) => u.id === r.actorUserId);
         return {
           date: this.localDate(r.createdAt),
-          before: r.previousQuantityMilli === null ? 0 : fromMilli(r.previousQuantityMilli),
+          before: r.previousQuantityMilli === null ? null : fromMilli(r.previousQuantityMilli),
           after: fromMilli(r.newQuantityMilli),
           by: actor?.name ?? "Sistema",
           byRole: actor ? capitalize(actor.role) : undefined,

@@ -23,15 +23,15 @@ export function OrderCard({ interpretation: i, confirming, onChange, onConfirm, 
   const [field, setField] = useState<string | null>(null);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const amounts = i.items.map(amountOf);
-  const total = amounts.every((a) => a !== null) ? amounts.reduce((s: number, a) => s + (a ?? 0), 0) : null;
+  const total = i.statedTotal ?? (amounts.every((a) => a !== null) ? amounts.reduce((s: number, a) => s + (a ?? 0), 0) : null);
   const flagged = (key: string) => i.flags.includes(key);
   const set = (key: keyof OrderInterpretation, value: string) => onChange({ ...i, [key]: value, flags: i.flags.filter((f) => f !== key) });
 
   const fields: { key: keyof OrderInterpretation; label: string; mono?: boolean; kind?: "text" | "date"; display: string; options?: { value: string; label: string }[] }[] = [
-    { key: "supplierName", label: "Proveedor", display: i.supplierName },
-    { key: "number", label: "Pedido", mono: true, display: `N.º ${i.number}` },
+    { key: "supplierName", label: "Proveedor", display: i.supplierName ? `${i.supplierName}${i.supplierMatch === "new" ? " (nuevo)" : ""}` : "Sin indicar" },
+    { key: "number", label: "Pedido", mono: true, display: i.number ? `N.º ${i.number}` : "Sin número" },
     { key: "date", label: "Fecha", mono: true, kind: "date", display: formatDate(i.date) },
-    { key: "orderedBy", label: "Pedido por", display: i.orderedBy },
+    { key: "orderedBy", label: "Pedido por", display: i.orderedBy || "Sin indicar" },
     {
       key: "mode",
       label: "Modalidad",
@@ -102,8 +102,16 @@ export function OrderCard({ interpretation: i, confirming, onChange, onConfirm, 
               className="flex w-full items-center gap-2.5 border-b border-border px-3 py-2.5 text-left transition-colors last:border-b-0 hover:bg-sunken lg:gap-3 lg:border-t lg:border-b-0 lg:px-3.5 lg:first:border-t-0"
             >
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-sm font-medium text-fg">{it.material}</span>
-                {it.spec ? <span className="font-mono text-xs text-fg-3">{it.spec}</span> : null}
+                <span className="flex flex-wrap items-center gap-1.5 text-sm font-medium text-fg">
+                  {it.material}
+                  {it.match === "suggested" ? <VerifyFlag variant="pill" /> : null}
+                  {it.match === "new" ? <span className="rounded-md bg-ai-soft px-1.5 py-0.5 text-[11px] font-medium text-ai">Material nuevo</span> : null}
+                </span>
+                {it.match === "suggested" && it.mention ? (
+                  <span className="text-xs text-warning">Dijiste «{it.mention}» · toca para confirmar</span>
+                ) : it.spec ? (
+                  <span className="font-mono text-xs text-fg-3">{it.spec}</span>
+                ) : null}
               </span>
               {desktop ? (
                 <>
@@ -124,7 +132,7 @@ export function OrderCard({ interpretation: i, confirming, onChange, onConfirm, 
             </button>
           ))}
           <div className="flex items-center gap-2.5 border-t border-border bg-sunken px-3 py-2.5 lg:px-3.5">
-            <span className="flex-1 text-[13px] text-fg-2">Total</span>
+            <span className="flex-1 text-[13px] text-fg-2">{i.statedTotal != null ? "Total informado" : "Total"}</span>
             <span className="font-mono text-base font-semibold text-fg">{total === null ? "A confirmar" : formatMoney(total)}</span>
           </div>
         </div>
@@ -145,7 +153,7 @@ export function OrderCard({ interpretation: i, confirming, onChange, onConfirm, 
         interpretation={i}
         onClose={() => setEditIndex(null)}
         onSave={(items) => {
-          onChange({ ...i, items, flags: i.flags.filter((f) => f !== "precios") });
+          onChange({ ...i, items, flags: i.flags.filter((f) => f !== "precios" && (f !== "items" || items.some((x) => x.match === "suggested"))) });
           setEditIndex(null);
         }}
       />

@@ -25,7 +25,7 @@ export function DeliveryCell({ order }: { order: OrderSummary }) {
   const v = deliveryVisual(order);
   const d = order.delivery;
   const detail =
-    d.status === "entregado" ? (order.itemsLabel.includes("materiales") ? "Completo" : `${formatNumber(d.delivered)}/${formatNumber(d.ordered)} u`) : `${formatNumber(d.delivered)} de ${formatNumber(d.ordered)} u`;
+    d.status === "entregado" ? (order.itemsLabel.includes("materiales") ? "Completo" : `${formatNumber(d.delivered)}/${formatNumber(d.ordered)} ${d.unit}`) : `${formatNumber(d.delivered)} de ${formatNumber(d.ordered)} ${d.unit}`;
   return (
     <StatusCell icon={<v.icon size={14} className={v.color} />} label={v.label} color={v.color} pct={v.pct} tone={v.tone} detail={detail} />
   );

@@ -11,9 +11,9 @@ import { FilterChip, SearchField, SelectChip } from "@/components/ui/Fields";
 import { Sheet } from "@/components/ui/Sheet";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/States";
 import { cn } from "@/components/ui/cn";
-import { useToast } from "@/components/ui/Toast";
 import { useActivity, useSupplierOptions } from "@/queries";
 import { useAssistant } from "@/features/assistant/AssistantProvider";
+import { downloadCsv } from "@/lib/csv";
 
 const KINDS = Object.keys(activityMeta) as ActivityKind[];
 
@@ -36,7 +36,6 @@ function groupByDay(events: ActivityEvent[]) {
 
 export function ActivityPage() {
   const navigate = useNavigate();
-  const toast = useToast();
   const assistant = useAssistant();
   const today = assistant.today;
   const suppliers = useSupplierOptions();
@@ -101,7 +100,7 @@ export function ActivityPage() {
         title="Actividad"
         subtitle="Todo lo que se registró o corrigió en la obra, en orden cronológico"
         actions={
-          <Button variant="secondary" icon={Download} onClick={() => toast("La exportación estará disponible con el backend", "info")}>
+          <Button variant="secondary" icon={Download} onClick={() => downloadCsv("actividad.csv", ["Fecha y hora", "Tipo", "Descripción", "Motivo"], (data?.events ?? []).map((e) => [e.at.replace("T", " "), e.title, e.description, e.reason ?? ""]))}>
             Exportar
           </Button>
         }

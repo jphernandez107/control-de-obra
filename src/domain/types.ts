@@ -244,7 +244,8 @@ export interface MaterialDeliveryRow {
 
 export interface ComputationChange {
   date: ISODate;
-  before: number;
+  /** `null` when the value was first defined. */
+  before: number | null;
   after: number;
   by: string;
   byRole?: string;

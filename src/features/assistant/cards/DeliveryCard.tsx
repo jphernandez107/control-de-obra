@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link2, Truck } from "lucide-react";
 import type { DeliveryInterpretation } from "@/domain/assistant";
 import { formatDate, formatNumber } from "@/domain/format";
 import { DocChip } from "@/components/ui/DocChip";
 import { cn } from "@/components/ui/cn";
 import { useIsDesktop } from "@/hooks/useMediaQuery";
-import { CardActions, CardShell, EditableValue, FieldBox, Outcome } from "./parts";
+import { CardActions, CardShell, EditableValue, FieldBox, Outcome, parseQuantityInput } from "./parts";
 
 interface Props {
   interpretation: DeliveryInterpretation;
@@ -26,8 +26,8 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
   const set = (key: keyof DeliveryInterpretation, value: string) =>
     onChange({ ...i, [key]: value, flags: i.flags.filter((f) => f !== key) });
   const setNow = (lineId: string, raw: string) => {
-    const n = Math.max(0, Math.round(Number(raw.replace(/\D/g, "")) || 0));
-    onChange({ ...i, items: i.items.map((it) => (it.orderLineId === lineId ? { ...it, now: Math.min(n, it.ordered - it.before) } : it)) });
+    const n = Math.max(0, parseQuantityInput(raw) ?? 0);
+    onChange({ ...i, items: i.items.map((it) => (it.orderLineId === lineId ? { ...it, now: Math.min(n, Math.round((it.ordered - it.before) * 1000) / 1000) } : it)) });
   };
 
   const fieldProps = (key: string) => ({ editing: field === key, onEdit: () => setField(key) });
@@ -67,18 +67,18 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
         <div className="flex gap-2.5">
           {desktop ? (
             <>
-              <FieldBox label="Proveedor" className="w-[210px]" {...fieldProps("supplierName")}>
+              <FieldBox label="Proveedor" className="w-[190px]" {...fieldProps("supplierName")}>
                 {editor("supplierName")}
               </FieldBox>
-              <FieldBox label="Pedido" mono className="w-[118px]" {...fieldProps("orderNumber")}>
+              <FieldBox label="Pedido" mono className="w-[104px]" {...fieldProps("orderNumber")}>
                 {editor("orderNumber")}
               </FieldBox>
             </>
           ) : null}
-          <FieldBox label="Remito" mono flagged={flagged("remito")} className="flex-1 lg:w-[176px] lg:flex-none" {...fieldProps("remito")}>
+          <FieldBox label="Remito" mono flagged={flagged("remito")} className="flex-1 lg:w-[160px] lg:flex-none" {...fieldProps("remito")}>
             {editor("remito")}
           </FieldBox>
-          <FieldBox label="Fecha" mono className="flex-1" {...fieldProps("date")}>
+          <FieldBox label="Fecha" mono className="min-w-[124px] flex-1" {...fieldProps("date")}>
             {editor("date", "date")}
           </FieldBox>
         </div>
@@ -103,13 +103,7 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
           {i.items.map((it) => {
             const pending = it.ordered - it.before - it.now;
             const nowCell = editingAll ? (
-              <input
-                aria-label={`Cantidad entregada de ${it.material}`}
-                inputMode="numeric"
-                value={it.now}
-                onChange={(e) => setNow(it.orderLineId, e.target.value)}
-                className="h-9 w-full rounded-md border border-accent bg-surface px-2 text-right font-mono text-sm font-semibold text-info outline-none"
-              />
+              <QuantityInput label={`Cantidad entregada de ${it.material}`} value={it.now} onCommit={(raw) => setNow(it.orderLineId, raw)} />
             ) : (
               formatNumber(it.now)
             );
@@ -159,5 +153,22 @@ export function DeliveryCard({ interpretation: i, confirming, onChange, onConfir
         </Outcome>
       </div>
     </CardShell>
+  );
+}
+
+/** Decimal-friendly quantity field ("6,5"); commits on blur/Enter. */
+function QuantityInput({ label, value, onCommit }: { label: string; value: number; onCommit: (raw: string) => void }) {
+  const [text, setText] = useState(formatNumber(value));
+  useEffect(() => setText(formatNumber(value)), [value]);
+  return (
+    <input
+      aria-label={label}
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => onCommit(text)}
+      onKeyDown={(e) => e.key === "Enter" && onCommit(text)}
+      className="h-9 w-full rounded-md border border-accent bg-surface px-2 text-right font-mono text-sm font-semibold text-info outline-none"
+    />
   );
 }

@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/Button";
 import { cn } from "@/components/ui/cn";
 import { useToast } from "@/components/ui/Toast";
 import { useIsDesktop } from "@/hooks/useMediaQuery";
-import { useDashboard } from "@/queries";
-import { fileToAttachment, sampleAttachment, useAssistant } from "@/features/assistant/AssistantProvider";
+import { useDashboard, useSession } from "@/queries";
+import { fileToAttachment, isSupportedAttachment, useAssistant } from "@/features/assistant/AssistantProvider";
 import { AttachSheet } from "@/features/assistant/AttachSheet";
 import { DESKTOP_SUGGESTIONS, DesktopComposer, MOBILE_SUGGESTIONS, MobileComposer, SuggestionChips, type Suggestion } from "@/features/assistant/Composer";
 import { ContextPanel } from "@/features/assistant/ContextPanel";
@@ -31,6 +31,7 @@ export function AssistantPage() {
   const toast = useToast();
   const navigate = useNavigate();
   const dashboard = useDashboard();
+  const session = useSession();
   const [attachOpen, setAttachOpen] = useState(false);
   const [conversationsOpen, setConversationsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -65,16 +66,23 @@ export function AssistantPage() {
 
   const pickExample = (example: (typeof EXAMPLES)[number]) => {
     if (example.photo) {
-      composer.addAttachment(sampleAttachment("comprobante_pedido.jpg"));
-      composer.prefill("Marcelo pidió esto a Hierros Córdoba");
+      (desktop ? fileRef : cameraRef).current?.click();
     } else {
       composer.prefill(example.text);
     }
   };
 
+  const attach = (file: File) => {
+    if (!isSupportedAttachment(file)) {
+      toast("Formato no soportado. Adjunta un PDF o una foto (JPG, PNG o HEIC).", "info");
+      return;
+    }
+    composer.addAttachment(fileToAttachment(file));
+  };
+
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) composer.addAttachment(fileToAttachment(file));
+    if (file) attach(file);
     e.target.value = "";
   };
 
@@ -118,7 +126,7 @@ export function AssistantPage() {
           onDrop={(e) => {
             e.preventDefault();
             const file = e.dataTransfer.files?.[0];
-            if (file) composer.addAttachment(fileToAttachment(file));
+            if (file) attach(file);
           }}
         >
           {!assistant.ready ? null : hasMessages ? (
@@ -152,7 +160,7 @@ export function AssistantPage() {
                   <span className="flex size-10 items-center justify-center rounded-[11px] bg-ai-soft text-ai">
                     <Sparkles size={20} />
                   </span>
-                  <h1 className="text-[32px] leading-[38px] font-semibold tracking-[-0.8px] text-fg">Hola, Juan. Cuéntame qué pasó en la obra.</h1>
+                  <h1 className="text-[32px] leading-[38px] font-semibold tracking-[-0.8px] text-fg">{session.data ? `Hola, ${session.data.user.name.split(" ")[0]}. ` : ""}Cuéntame qué pasó en la obra.</h1>
                   <p className="text-base leading-6 text-fg-2">
                     Registro pedidos, entregas y pagos a partir de mensajes, fotos de remitos o capturas de transferencias. Siempre te muestro lo que entendí antes de guardar.
                   </p>

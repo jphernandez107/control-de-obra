@@ -2,8 +2,8 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "@/app/theme";
 import { useAssistant } from "@/features/assistant/AssistantProvider";
-import { formatDate } from "@/domain/format";
-import { useDashboard } from "@/queries";
+import { formatDate, initialsOf } from "@/domain/format";
+import { useDashboard, useSession } from "@/queries";
 import { cn } from "../ui/cn";
 import { NAV, isActive } from "./nav";
 
@@ -12,6 +12,8 @@ export function Sidebar() {
   const { theme, toggle } = useTheme();
   const { pendingCount } = useAssistant();
   const { data } = useDashboard();
+  const session = useSession();
+  const user = session.data?.user;
   const computation = data?.computation;
 
   return (
@@ -59,10 +61,10 @@ export function Sidebar() {
         </span>
       </Link>
       <div className="flex items-center gap-2.5 px-2 pt-3.5">
-        <span className="flex size-[30px] items-center justify-center rounded-full bg-surface-2 text-[11px] font-semibold text-fg-2">JH</span>
+        <span className="flex size-[30px] items-center justify-center rounded-full bg-surface-2 text-[11px] font-semibold text-fg-2">{user ? initialsOf(user.name) : ""}</span>
         <span className="flex flex-1 flex-col gap-px">
-          <span className="text-[13px] font-medium text-fg">Juan Hernández</span>
-          <span className="text-xs text-fg-3">Propietario</span>
+          <span className="text-[13px] font-medium text-fg">{user?.name ?? "…"}</span>
+          <span className="text-xs text-fg-3">{user ? user.role.charAt(0).toUpperCase() + user.role.slice(1) : ""}</span>
         </span>
         <button
           type="button"

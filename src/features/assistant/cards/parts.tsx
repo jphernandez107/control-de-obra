@@ -107,7 +107,12 @@ export function Outcome({ children }: { children: ReactNode }) {
 type InputKind = "text" | "date" | "number" | "money";
 
 function toInputValue(value: string | number, kind: InputKind): string {
-  if (kind === "money" || kind === "number") return String(value);
+  if (kind === "money" && typeof value === "number") {
+    // Minor units → "500000" or "1712,50" for editing.
+    const whole = Math.trunc(value / 100);
+    const cents = Math.abs(value % 100);
+    return cents ? `${whole},${String(cents).padStart(2, "0")}` : String(whole);
+  }
   return String(value);
 }
 
@@ -179,7 +184,7 @@ export function EditableValue({
       ref={ref}
       {...common}
       type={kind === "date" ? "date" : "text"}
-      inputMode={kind === "number" || kind === "money" ? "numeric" : undefined}
+      inputMode={kind === "number" || kind === "money" ? "decimal" : undefined}
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -265,9 +270,15 @@ export function KVRow({
   );
 }
 
-export function parseMoneyInput(raw: string): number | null {
-  const clean = raw.replace(/[^\d,]/g, "").replace(",", ".");
-  if (!clean) return null;
-  const n = Number(clean);
-  return Number.isFinite(n) ? n : null;
+/** Money typed by the user → integer minor units. */
+export { parseMoneyInput } from "@/domain/format";
+
+/** Quantity typed by the user ("6,5", "3.000") → number, or null. */
+export function parseQuantityInput(raw: string): number | null {
+  let text = raw.trim().replace(/[^\d.,]/g, "");
+  if (!text) return null;
+  if (text.includes(",")) text = text.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(text)) text = text.replace(/\./g, "");
+  const n = Number(text);
+  return Number.isFinite(n) ? Math.round(n * 1000) / 1000 : null;
 }

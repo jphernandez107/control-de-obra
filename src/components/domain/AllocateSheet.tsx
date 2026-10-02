@@ -3,6 +3,7 @@ import { Link2 } from "lucide-react";
 import type { Payment, SupplierDetail } from "@/domain/types";
 import { formatDate, formatMoney } from "@/domain/format";
 import { useServices } from "@/services";
+import { errorMessage } from "@/services/api/client";
 import { useInvalidateAll } from "@/queries";
 import { Button } from "../ui/Button";
 import { Sheet } from "../ui/Sheet";
@@ -11,7 +12,7 @@ import { cn } from "../ui/cn";
 
 /** Assigns an unallocated supplier payment to one of its open orders. */
 export function AllocateSheet({ open, onClose, supplier, payment }: { open: boolean; onClose: () => void; supplier: SupplierDetail; payment?: Payment }) {
-  const { assistant } = useServices();
+  const { payments } = useServices();
   const invalidate = useInvalidateAll();
   const toast = useToast();
   const candidates = supplier.openOrderList.filter((o) => (o.pendingPayment ?? 0) > 0).sort((a, b) => a.date.localeCompare(b.date));
@@ -25,24 +26,20 @@ export function AllocateSheet({ open, onClose, supplier, payment }: { open: bool
   if (!payment) return null;
   const order = candidates.find((o) => o.id === selected);
 
+  const free = payment.unallocatedAmount;
   const save = async () => {
     if (!order) return;
     setSaving(true);
-    await assistant.confirm(`alloc:${payment.id}:manual`, {
-      kind: "payment",
-      supplierId: supplier.id,
-      supplierName: supplier.name,
-      amount: payment.amount,
-      date: payment.date,
-      method: payment.method,
-      allocation: { type: "order", orderId: order.id, orderNumber: order.number },
-      preview: { supplierBalanceBefore: supplier.balance, supplierBalanceAfter: supplier.balance },
-      flags: [],
-    });
-    await invalidate();
-    setSaving(false);
-    onClose();
-    toast(`Pago imputado al pedido ${order.number}`);
+    try {
+      await payments.allocate(payment.id, [{ orderId: order.id, amount: Math.min(free, order.pendingPayment ?? free) }]);
+      await invalidate();
+      onClose();
+      toast(`Pago imputado al pedido ${order.number}`);
+    } catch (error) {
+      toast(errorMessage(error, "No se pudo imputar el pago."), "info");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -50,7 +47,7 @@ export function AllocateSheet({ open, onClose, supplier, payment }: { open: bool
       open={open}
       onClose={onClose}
       title="Imputar a un pedido"
-      subtitle={`${formatMoney(payment.amount)} recibido el ${formatDate(payment.date)} · ${supplier.name}`}
+      subtitle={`${formatMoney(payment.unallocatedAmount)} sin imputar del pago del ${formatDate(payment.date)} · ${supplier.name}`}
       footer={
         <Button icon={Link2} size="lg" className="flex-1" disabled={!order} loading={saving} onClick={save}>
           {order ? `Imputar al pedido ${order.number}` : "Imputar"}
@@ -61,7 +58,7 @@ export function AllocateSheet({ open, onClose, supplier, payment }: { open: bool
         {candidates.length === 0 ? <p className="text-sm text-fg-2">No hay pedidos con saldo pendiente para imputar.</p> : null}
         {candidates.map((o) => {
           const active = o.id === selected;
-          const after = (o.pendingPayment ?? 0) - payment.amount;
+          const after = (o.pendingPayment ?? 0) - payment.unallocatedAmount;
           return (
             <button
               key={o.id}

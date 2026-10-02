@@ -3,7 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import { ArrowUp, Camera, ClipboardPlus, FileText, Image as ImageIcon, Mic, Paperclip, Scale, Truck, Wallet, X } from "lucide-react";
 import { cn } from "@/components/ui/cn";
 import { useToast } from "@/components/ui/Toast";
-import { fileToAttachment } from "./AssistantProvider";
+import { fileToAttachment, isSupportedAttachment } from "./AssistantProvider";
 import { createDictation, type ComposerController } from "./useComposer";
 
 export interface Suggestion {
@@ -101,6 +101,7 @@ function FileInputs({ onFile, cameraRef, fileRef }: { onFile: (f: File) => void;
 }
 
 export function DesktopComposer({ composer, onFocusChange }: { composer: ComposerController; onFocusChange?: (focused: boolean) => void }) {
+  const toast = useToast();
   const cameraRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -165,7 +166,7 @@ export function DesktopComposer({ composer, onFocusChange }: { composer: Compose
           <ArrowUp size={18} />
         </button>
       </div>
-      <FileInputs onFile={(f) => composer.addAttachment(fileToAttachment(f))} cameraRef={cameraRef} fileRef={fileRef} />
+      <FileInputs onFile={(f) => (isSupportedAttachment(f) ? composer.addAttachment(fileToAttachment(f)) : toast("Formato no soportado. Adjunta un PDF o una foto.", "info"))} cameraRef={cameraRef} fileRef={fileRef} />
     </div>
   );
 }

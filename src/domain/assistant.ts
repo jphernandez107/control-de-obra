@@ -146,7 +146,8 @@ export interface ChoiceOption {
 export interface BalanceRow {
   label: string;
   description: string;
-  amount: number;
+  /** `null` when the order value is still unknown. */
+  amount: number | null;
   unallocated?: boolean;
   orderId?: ID;
 }

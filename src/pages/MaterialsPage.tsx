@@ -14,6 +14,10 @@ import { EmptyState, ErrorState, Skeleton } from "@/components/ui/States";
 import { cn } from "@/components/ui/cn";
 import { useToast } from "@/components/ui/Toast";
 import { useMaterials, useUploadComputation } from "@/queries";
+import { ComputationImportSheet } from "@/components/domain/ComputationImportSheet";
+import { errorMessage } from "@/services/api/client";
+import type { ComputationPreview } from "@/services/types";
+import { downloadCsv } from "@/lib/csv";
 
 type Status = ComputationStatus;
 
@@ -85,10 +89,20 @@ export function MaterialsPage() {
   const worst = materials.filter((m) => m.computation?.status === "supera").sort((a, b) => (b.computation?.variation ?? 0) - (a.computation?.variation ?? 0))[0];
 
   const startUpload = () => fileRef.current?.click();
-  const onUpload = (file?: File) =>
+  const [preview, setPreview] = useState<ComputationPreview | null>(null);
+  const onUpload = (file?: File) => {
+    if (!file) return;
     upload.mutate(file, {
-      onSuccess: () => toast(loaded ? "Cómputo actualizado" : "Cómputo cargado: los materiales quedaron vinculados"),
+      onSuccess: setPreview,
+      onError: (error) => toast(errorMessage(error, "No se pudo leer la planilla."), "info"),
     });
+  };
+  const exportCsv = () =>
+    downloadCsv(
+      "materiales-y-computo.csv",
+      ["Material", "Categoría", "Unidad", "Pedido", "Entregado", "Pendiente de entrega", "Cómputo", "% del cómputo", "Estado"],
+      materials.map((m) => [m.name, m.category, m.unit, m.ordered, m.delivered, m.pendingDelivery, m.computation?.expected ?? null, m.computation?.percent ?? null, STATUS_LABEL[statusOf(m)]]),
+    );
 
   const statusOptions = (["supera", "cerca", "alcanzado", "dentro", "sin_computo"] as Status[])
     .filter((s) => materials.some((m) => statusOf(m) === s))
@@ -113,7 +127,7 @@ export function MaterialsPage() {
         actions={
           loaded ? (
             <>
-              <Button variant="ghost" icon={Download} onClick={() => toast("La exportación estará disponible con el backend", "info")}>
+              <Button variant="ghost" icon={Download} onClick={() => exportCsv()}>
                 Exportar
               </Button>
               <Button variant="secondary" icon={RefreshCw} loading={upload.isPending} onClick={startUpload}>
@@ -121,7 +135,7 @@ export function MaterialsPage() {
               </Button>
             </>
           ) : (
-            <Button variant="secondary" icon={Download} onClick={() => toast("La exportación estará disponible con el backend", "info")}>
+            <Button variant="secondary" icon={Download} onClick={() => exportCsv()}>
               Exportar
             </Button>
           )
@@ -134,7 +148,7 @@ export function MaterialsPage() {
     <input
       ref={fileRef}
       type="file"
-      accept=".xlsx,.xls,.csv,.pdf,application/pdf"
+      accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       className="hidden"
       onChange={(e) => {
         onUpload(e.target.files?.[0] ?? undefined);
@@ -179,6 +193,7 @@ export function MaterialsPage() {
           className="flex-1"
         />
         {hiddenInput}
+        <ComputationImportSheet preview={preview} onClose={() => setPreview(null)} />
       </Page>
     );
   }
@@ -511,6 +526,7 @@ export function MaterialsPage() {
       )}
 
       {hiddenInput}
+      <ComputationImportSheet preview={preview} onClose={() => setPreview(null)} />
       <Sheet open={exampleOpen} onClose={() => setExampleOpen(false)} title="Ejemplo de cómputo" subtitle="Una fila por material, con unidad y cantidad prevista" size="lg">
         <div className="flex flex-col gap-3 pb-4">
           <div className="overflow-hidden rounded-[10px] border border-border">
@@ -533,7 +549,7 @@ export function MaterialsPage() {
               </div>
             ))}
           </div>
-          <p className="text-[13px] text-fg-3">Acepta planillas (.xlsx, .csv) o PDF. Después de subirlo revisas cómo se vinculó cada material con lo ya pedido.</p>
+          <p className="text-[13px] text-fg-3">Acepta planillas .xlsx o .csv con columnas material, unidad y cantidad (opcional: etapa y % de desperdicio). Después de subirla revisas cómo se vinculó cada material con lo ya pedido.</p>
         </div>
       </Sheet>
     </Page>

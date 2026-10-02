@@ -6,7 +6,10 @@ import { formatDate, formatMoney, paymentMethodLabel } from "@/domain/format";
 import { DocChip } from "@/components/ui/DocChip";
 import { Pill } from "@/components/ui/Pill";
 import { useOrders } from "@/queries";
-import { fileToAttachment } from "../AssistantProvider";
+import { useServices } from "@/services";
+import { errorMessage } from "@/services/api/client";
+import { useToast } from "@/components/ui/Toast";
+import { fileToAttachment, isSupportedAttachment } from "../AssistantProvider";
 import { CardActions, CardShell, EditableValue, KVRow, VerifyFlag, parseMoneyInput } from "./parts";
 
 interface Props {
@@ -21,6 +24,9 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
   const [field, setField] = useState<string | null>(null);
   const [editingAll, setEditingAll] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const { documents } = useServices();
+  const toast = useToast();
   const orders = useOrders();
   const supplierOrders = (orders.data?.orders ?? []).filter((o) => o.supplier.id === i.supplierId && ((o.pendingPayment ?? 0) > 0 || (i.allocation.type === "order" && o.id === i.allocation.orderId)));
   const allocatedOrder = i.allocation.type === "order" ? orders.data?.orders.find((o) => o.id === (i.allocation as { orderId: string }).orderId) : undefined;
@@ -29,6 +35,7 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
     const order = next.allocation.type === "order" ? orders.data?.orders.find((o) => o.id === (next.allocation as { orderId: string }).orderId) : undefined;
     const before = order?.pendingPayment ?? undefined;
     const after = before !== undefined ? Math.max(before - next.amount, 0) : undefined;
+    const unallocatedAmount = next.allocation.type === "unallocated" ? next.amount : before !== undefined ? Math.max(next.amount - before, 0) : 0;
     const tags: StatusTag[] = order
       ? [order.delivery.status === "entregado" ? "entregado" : order.delivery.status === "parcial" ? "entrega_parcial" : "entrega_pendiente", after === 0 ? "pagado" : "pago_parcial"]
       : ["pago_sin_imputar"];
@@ -38,7 +45,8 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
         orderPendingBefore: before,
         orderPendingAfter: after,
         supplierBalanceBefore: next.preview.supplierBalanceBefore,
-        supplierBalanceAfter: next.preview.supplierBalanceBefore - next.amount,
+        supplierBalanceAfter: next.existingPaymentId ? next.preview.supplierBalanceBefore : next.preview.supplierBalanceBefore - next.amount,
+        unallocatedAmount,
         resultingTags: tags,
       },
     };
@@ -48,18 +56,19 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
   const setEditing = (key: string) => (e: boolean) => setField(e ? key : null);
   const clearFlag = (key: string) => i.flags.filter((f) => f !== key);
 
-  const allocationLabel = i.allocation.type === "order" ? `Pedido ${i.allocation.orderNumber}` : "Sin imputar (cuenta corriente)";
+  const allocationLabel =
+    i.allocation.type === "order" ? `Pedido ${i.allocation.orderNumber}` : i.allocation.type === "split" ? `Repartido en ${i.allocation.parts.length} pedidos` : "Sin imputar (cuenta corriente)";
   const p = i.preview;
 
   return (
     <CardShell
       icon={Wallet}
-      title="Detecté un pago"
+      title={i.existingPaymentId ? "Imputar un pago" : "Detecté un pago"}
       subtitle="Revisa antes de guardar"
       badge
       actions={
         <CardActions
-          confirmLabel="Confirmar pago"
+          confirmLabel={i.existingPaymentId ? "Confirmar imputación" : "Confirmar pago"}
           onConfirm={() => {
             setEditingAll(false);
             onConfirm();
@@ -111,15 +120,17 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
           <KVRow label="Imputación" editing={isEditing("allocation")} onEdit={() => setField("allocation")}>
             <EditableValue
               ariaLabel="Imputación"
-              value={i.allocation.type === "order" ? i.allocation.orderId : "unallocated"}
+              value={i.allocation.type === "order" ? i.allocation.orderId : i.allocation.type}
               display={allocationLabel}
               options={[
-                ...supplierOrders.map((o) => ({ value: o.id, label: `Pedido ${o.number} · saldo ${formatMoney(o.pendingPayment ?? 0)}` })),
-                { value: "unallocated", label: "Sin imputar (cuenta corriente)" },
+                ...(i.allocation.type === "split" ? [{ value: "split", label: allocationLabel }] : []),
+                ...supplierOrders.map((o) => ({ value: o.id, label: `Pedido ${o.number} · saldo ${o.pendingPayment === null ? "a confirmar" : formatMoney(o.pendingPayment)}` })),
+                ...(i.existingPaymentId ? [] : [{ value: "unallocated", label: "Sin imputar (cuenta corriente)" }]),
               ]}
               editing={isEditing("allocation")}
               onEditingChange={setEditing("allocation")}
               onCommit={(v) => {
+                if (v === "split") return;
                 const order = supplierOrders.find((o) => o.id === v);
                 onChange(recompute({ ...i, allocation: order ? { type: "order", orderId: order.id, orderNumber: order.number } : { type: "unallocated" } }));
               }}
@@ -132,7 +143,21 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
           {i.allocation.type === "order" && p.orderPendingBefore !== undefined ? (
             <EffectRow label={`Pedido ${i.allocation.orderNumber} · pendiente`} from={p.orderPendingBefore} to={p.orderPendingAfter ?? 0} />
           ) : null}
+          {i.allocation.type === "split"
+            ? i.allocation.parts.map((part) => (
+                <div key={part.orderId} className="flex items-center gap-2">
+                  <span className="flex-1 text-[13px] text-fg-2">Al pedido {part.orderNumber}</span>
+                  <span className="font-mono text-[13px] font-semibold text-fg">{formatMoney(part.amount)}</span>
+                </div>
+              ))
+            : null}
           <EffectRow label="Saldo del proveedor" from={p.supplierBalanceBefore} to={p.supplierBalanceAfter} />
+          {p.unallocatedAmount && i.allocation.type !== "unallocated" ? (
+            <div className="flex items-center gap-2">
+              <span className="flex-1 text-[13px] text-fg-2">Queda sin imputar</span>
+              <span className="font-mono text-[13px] font-semibold text-ai">{formatMoney(p.unallocatedAmount)}</span>
+            </div>
+          ) : null}
           {p.resultingTags?.length ? (
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs text-fg-3">{i.allocation.type === "order" ? `Pedido ${i.allocation.orderNumber}:` : "Quedará como:"}</span>
@@ -141,7 +166,7 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
               ))}
             </div>
           ) : null}
-          {allocatedOrder === undefined && i.allocation.type === "unallocated" ? (
+          {allocatedOrder === undefined && i.allocation.type === "unallocated" && !i.existingPaymentId ? (
             <span className="text-xs leading-[17px] text-fg-3">Reduce el saldo del proveedor; podrás imputarlo a un pedido más adelante.</span>
           ) : null}
         </div>
@@ -152,7 +177,7 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
           <button type="button" onClick={() => fileRef.current?.click()} className="flex items-center gap-2.5 rounded-[10px] border border-border-strong px-3 py-2.5 text-left hover:bg-sunken">
             <FilePlus size={16} className="text-fg-2" />
             <span className="flex-1 text-[13px] text-fg-2">Sin comprobante de pago</span>
-            <span className="text-[13px] font-semibold text-accent">Adjuntar</span>
+            <span className="text-[13px] font-semibold text-accent">{uploading ? "Subiendo…" : "Adjuntar"}</span>
           </button>
         )}
         <input
@@ -160,10 +185,23 @@ export function PaymentCard({ interpretation: i, confirming, onChange, onConfirm
           type="file"
           accept="image/*,application/pdf"
           className="hidden"
-          onChange={(e) => {
+          onChange={async (e) => {
             const file = e.target.files?.[0];
-            if (file) onChange({ ...i, document: fileToAttachment(file) });
             e.target.value = "";
+            if (!file) return;
+            if (!isSupportedAttachment(file)) {
+              toast("Formato no soportado. Adjunta un PDF o una foto.", "info");
+              return;
+            }
+            setUploading(true);
+            try {
+              const uploaded = await documents.upload(file, "payment_proof");
+              onChange({ ...i, document: { ...fileToAttachment(file), documentId: uploaded.id, url: uploaded.url } });
+            } catch (error) {
+              toast(errorMessage(error, "No se pudo subir el comprobante."), "info");
+            } finally {
+              setUploading(false);
+            }
           }}
         />
       </div>

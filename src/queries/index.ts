@@ -13,7 +13,25 @@ export const queryKeys = {
   material: (id: string) => ["materials", id] as const,
   activity: (filters: ActivityFilters) => ["activity", filters] as const,
   conversations: ["assistant", "conversations"] as const,
+  session: ["session"] as const,
+  materialOptions: ["materials", "options"] as const,
+  units: ["units"] as const,
 };
+
+export function useSession() {
+  const { session } = useServices();
+  return useQuery({ queryKey: queryKeys.session, queryFn: () => session.get(), staleTime: 5 * 60_000 });
+}
+
+export function useMaterialOptions() {
+  const { materials } = useServices();
+  return useQuery({ queryKey: queryKeys.materialOptions, queryFn: () => materials.options() });
+}
+
+export function useUnits() {
+  const { materials } = useServices();
+  return useQuery({ queryKey: queryKeys.units, queryFn: () => materials.units(), staleTime: Infinity });
+}
 
 export function useDashboard() {
   const { dashboard } = useServices();
@@ -71,10 +89,19 @@ export function useInvalidateAll() {
   return () => client.invalidateQueries();
 }
 
+/** Uploads a computation spreadsheet and returns the matching preview (nothing is saved yet). */
 export function useUploadComputation() {
   const { materials } = useServices();
+  return useMutation({ mutationFn: (file: File) => materials.previewComputation(file) });
+}
+
+export function useImportComputation() {
+  const { materials } = useServices();
   const invalidate = useInvalidateAll();
-  return useMutation({ mutationFn: (file?: File) => materials.uploadComputation(file), onSuccess: invalidate });
+  return useMutation({
+    mutationFn: (v: { documentId: string; rows: Parameters<typeof materials.importComputation>[1] }) => materials.importComputation(v.documentId, v.rows),
+    onSuccess: invalidate,
+  });
 }
 
 export function useMarkReviewed() {
@@ -86,5 +113,5 @@ export function useMarkReviewed() {
 export function useAdjustComputation() {
   const { materials } = useServices();
   const invalidate = useInvalidateAll();
-  return useMutation({ mutationFn: (v: { id: string; expected: number }) => materials.adjustComputation(v.id, v.expected), onSuccess: invalidate });
+  return useMutation({ mutationFn: (v: { id: string; expected: number; reason?: string }) => materials.adjustComputation(v.id, v.expected, v.reason), onSuccess: invalidate });
 }

@@ -32,7 +32,7 @@ function supplierBalance(ledger: Ledger, supplierId: string): AssistantBlock[] {
           .map((o) => ({
             label: `Pedido ${o.number}`,
             description: o.total === null ? "Importe a confirmar" : o.payment.status === "parcial" ? `Pago parcial · pagado ${formatMoney(o.paid)}` : "Sin pagos",
-            amount: o.pendingPayment ?? 0,
+            amount: o.pendingPayment,
             orderId: o.id,
           })),
         ...detail.unallocatedPayments.map((p) => ({

@@ -250,7 +250,8 @@ export class MockAIProvider implements AIProvider {
       out.amount = parseAmountText(body || combined);
       out.paymentMethod = paymentMethod(combined) ?? "transferencia";
       out.items = [];
-      out.intent = out.orderReference ? "create_payment" : "record_supplier_account_payment";
+      // A receipt is a current-account payment only when it says so ("a cuenta").
+      out.intent = !out.orderReference && out.toCurrentAccount ? "record_supplier_account_payment" : "create_payment";
     } else if (documentType === "order_proof") {
       out.intent = "create_order";
       const total = /total[^\d$]*\$?\s*([\d.]+(?:,\d{1,2})?)/i.exec(body);

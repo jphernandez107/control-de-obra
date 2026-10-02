@@ -16,6 +16,7 @@ import { cn } from "@/components/ui/cn";
 import { useToast } from "@/components/ui/Toast";
 import { useOrder, useSupplier } from "@/queries";
 import { useAssistant } from "@/features/assistant/AssistantProvider";
+import { csvMoney, downloadCsv } from "@/lib/csv";
 
 export function SupplierDetailPage() {
   const { supplierId } = useParams({ from: "/proveedores/$supplierId" });
@@ -86,6 +87,11 @@ export function SupplierDetailPage() {
           {s.unallocatedPaid > 0 ? <Legend dot="bg-ai" label="Pago sin imputar" value={formatMoney(s.unallocatedPaid)} /> : null}
           <Legend dot="bg-surface-2 border border-border-strong" label="Saldo" value={formatMoney(s.balance)} />
         </div>
+        {s.unknownValueOrders ? (
+          <p className="text-[13px] text-warning">
+            {s.unknownValueOrders === 1 ? "1 pedido no tiene importe cargado" : `${s.unknownValueOrders} pedidos no tienen importe cargado`}: no suma al total y el saldo real puede ser mayor.
+          </p>
+        ) : null}
       </div>
 
       <div className="flex flex-col gap-3 px-5 pb-5 lg:hidden">
@@ -96,6 +102,11 @@ export function SupplierDetailPage() {
           <Figure label="Pagado" value={formatMoney(s.totalPaid)} small />
         </div>
         <SplitProgress height={6} segments={[{ value: pct(s.allocatedPaid), tone: "success" }, { value: pct(s.unallocatedPaid), tone: "ai" }]} />
+        {s.unknownValueOrders ? (
+          <p className="text-[13px] text-warning">
+            {s.unknownValueOrders === 1 ? "1 pedido no tiene importe cargado" : `${s.unknownValueOrders} pedidos no tienen importe cargado`}: no suma al total y el saldo real puede ser mayor.
+          </p>
+        ) : null}
       </div>
 
       {unallocated ? (
@@ -204,7 +215,7 @@ export function SupplierDetailPage() {
           <section className="flex flex-col gap-3 px-5 lg:px-0">
             <div className="flex items-center">
               <h2 className="flex-1 text-base font-semibold tracking-[-0.2px] text-fg">Cuenta corriente</h2>
-              <LinkButton className="hidden lg:inline" onClick={() => toast("La exportación estará disponible con el backend", "info")}>
+              <LinkButton className="hidden lg:inline" onClick={() => downloadCsv(`cuenta-corriente-${s.name}.csv`, ["Fecha", "Movimiento", "Detalle", "Pedido", "Pago", "Saldo"], s.ledger.map((e) => [e.date, e.title, e.description, csvMoney(e.orderAmount), csvMoney(e.paymentAmount), csvMoney(e.runningBalance)]))}>
                 Exportar
               </LinkButton>
             </div>

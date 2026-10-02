@@ -10,9 +10,9 @@ import { Button, IconButton } from "@/components/ui/Button";
 import { FilterChip, SearchField, SelectChip } from "@/components/ui/Fields";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/States";
 import { cn } from "@/components/ui/cn";
-import { useToast } from "@/components/ui/Toast";
 import { useOrders } from "@/queries";
 import { fileToAttachment, useAssistant } from "@/features/assistant/AssistantProvider";
+import { csvMoney, downloadCsv } from "@/lib/csv";
 
 type Segment = "todos" | "por_entregar" | "con_saldo" | "sin_comprobante";
 type DateRange = "7" | "30" | "mes";
@@ -29,7 +29,6 @@ function daysBefore(date: string, days: number) {
 
 export function OrdersPage() {
   const navigate = useNavigate();
-  const toast = useToast();
   const assistant = useAssistant();
   const { data, isPending, isError, refetch, isRefetching, dataUpdatedAt, errorUpdatedAt } = useOrders();
   const [search, setSearch] = useState("");
@@ -321,7 +320,7 @@ export function OrdersPage() {
         }
         actions={
           <>
-            <Button variant="secondary" icon={Download} onClick={() => toast("La exportación estará disponible con el backend", "info")}>
+            <Button variant="secondary" icon={Download} onClick={() => downloadCsv("pedidos.csv", ["Pedido", "Fecha", "Proveedor", "Materiales", "Total", "Pagado", "Pendiente de pago", "Entrega", "Pago"], orders.map((o) => [o.number, o.date, o.supplier.name, o.itemsLabel, csvMoney(o.total), csvMoney(o.payment.paid), csvMoney(o.pendingPayment), o.delivery.status, o.payment.status]))}>
               Exportar
             </Button>
             <Button icon={Sparkles} onClick={goAssistant}>

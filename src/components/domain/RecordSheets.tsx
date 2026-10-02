@@ -1,57 +1,57 @@
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
-import type { DeliveryInterpretation, PaymentInterpretation } from "@/domain/assistant";
 import type { OrderDetail, PaymentMethod } from "@/domain/types";
-import { formatMoney, formatNumber, paymentMethodLabel } from "@/domain/format";
+import { formatMoney, formatNumber, paymentMethodLabel, parseMoneyInput } from "@/domain/format";
 import { useServices } from "@/services";
+import { errorMessage } from "@/services/api/client";
 import { useInvalidateAll } from "@/queries";
+import { parseQuantityInput } from "@/features/assistant/cards/parts";
 import { Button } from "../ui/Button";
 import { FieldLabel, TextInput } from "../ui/Fields";
 import { Sheet } from "../ui/Sheet";
 import { useToast } from "../ui/Toast";
 
-function parseMoney(raw: string): number {
-  return Number(raw.replace(/[^\d,]/g, "").replace(",", ".")) || 0;
-}
-
 export function RegisterDeliverySheet({ order, open, onClose, today }: { order: OrderDetail; open: boolean; onClose: () => void; today: string }) {
-  const { assistant } = useServices();
+  const { deliveries } = useServices();
   const invalidate = useInvalidateAll();
   const toast = useToast();
   const pendingLines = order.lines.filter((l) => l.delivered < l.quantity);
-  const [qty, setQty] = useState<Record<string, number>>({});
+  const [qty, setQty] = useState<Record<string, string>>({});
   const [remito, setRemito] = useState("");
   const [date, setDate] = useState(today);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
-      setQty(Object.fromEntries(pendingLines.map((l) => [l.id, l.quantity - l.delivered])));
+      setQty(Object.fromEntries(pendingLines.map((l) => [l.id, formatNumber(l.quantity - l.delivered)])));
       setRemito("");
       setDate(today);
     }
   }, [open]);
 
+  const amounts = pendingLines.map((l) => ({ line: l, value: parseQuantityInput(qty[l.id] ?? "") ?? 0 }));
+  const over = amounts.find(({ line, value }) => value > line.quantity - line.delivered + 1e-9);
+
   const save = async () => {
     setSaving(true);
-    const interpretation: DeliveryInterpretation = {
-      kind: "delivery",
-      supplierName: order.supplier.name,
-      orderId: order.id,
-      orderNumber: order.number,
-      remito,
-      date,
-      items: pendingLines.map((l) => ({ orderLineId: l.id, material: l.materialName, unit: l.unit, ordered: l.quantity, before: l.delivered, now: qty[l.id] ?? 0 })),
-      flags: [],
-    };
-    await assistant.confirm(`manual-delivery-${order.id}`, interpretation);
-    await invalidate();
-    setSaving(false);
-    onClose();
-    toast("Entrega registrada");
+    try {
+      await deliveries.create({
+        orderId: order.id,
+        date,
+        reference: remito.trim() || null,
+        items: amounts.filter((a) => a.value > 0).map((a) => ({ orderItemId: a.line.id, quantity: a.value })),
+      });
+      await invalidate();
+      onClose();
+      toast("Entrega registrada");
+    } catch (error) {
+      toast(errorMessage(error, "No se pudo registrar la entrega."), "info");
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const total = Object.values(qty).reduce((s, n) => s + n, 0);
+  const total = amounts.reduce((s, a) => s + a.value, 0);
   return (
     <Sheet
       open={open}
@@ -59,7 +59,7 @@ export function RegisterDeliverySheet({ order, open, onClose, today }: { order: 
       title="Registrar entrega"
       subtitle={`Pedido ${order.number} · ${order.supplier.name}`}
       footer={
-        <Button icon={Check} size="lg" className="flex-1" loading={saving} disabled={total <= 0} onClick={save}>
+        <Button icon={Check} size="lg" className="flex-1" loading={saving} disabled={total <= 0 || Boolean(over)} onClick={save}>
           Confirmar entrega
         </Button>
       }
@@ -80,10 +80,10 @@ export function RegisterDeliverySheet({ order, open, onClose, today }: { order: 
                 <span className="w-16 text-right font-mono text-sm text-fg-2">{formatNumber(l.quantity - l.delivered)}</span>
                 <input
                   aria-label={`Cantidad que llega de ${l.materialName}`}
-                  inputMode="numeric"
-                  value={qty[l.id] ?? 0}
-                  onChange={(e) => setQty({ ...qty, [l.id]: Math.min(Number(e.target.value.replace(/\D/g, "")) || 0, l.quantity - l.delivered) })}
-                  className="h-10 w-24 rounded-lg border border-border-strong bg-surface px-2 text-right font-mono text-sm font-semibold text-info outline-none focus:border-accent"
+                  inputMode="decimal"
+                  value={qty[l.id] ?? ""}
+                  onChange={(e) => setQty({ ...qty, [l.id]: e.target.value })}
+                  className={`h-10 w-24 rounded-lg border bg-surface px-2 text-right font-mono text-sm font-semibold text-info outline-none focus:border-accent ${over?.line.id === l.id ? "border-danger" : "border-border-strong"}`}
                 />
               </div>
             ))}
@@ -99,7 +99,13 @@ export function RegisterDeliverySheet({ order, open, onClose, today }: { order: 
             <TextInput mono type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </label>
         </div>
-        <p className="text-[13px] text-fg-3">El estado de pago no cambia al registrar una entrega.</p>
+        {over ? (
+          <p className="text-[13px] text-danger">
+            {over.line.materialName}: solo faltan {formatNumber(over.line.quantity - over.line.delivered)} {over.line.unit}. Si llegó de más, regístralo como otro pedido.
+          </p>
+        ) : (
+          <p className="text-[13px] text-fg-3">El estado de pago no cambia al registrar una entrega.</p>
+        )}
       </div>
     </Sheet>
   );
@@ -122,7 +128,7 @@ export function RegisterPaymentSheet({
   orders: { id: string; number: string; pendingPayment: number | null; deliveryStatus: string }[];
   defaultOrderId?: string;
 }) {
-  const { assistant } = useServices();
+  const { payments } = useServices();
   const invalidate = useInvalidateAll();
   const toast = useToast();
   const [allocation, setAllocation] = useState<string>("unallocated");
@@ -141,28 +147,30 @@ export function RegisterPaymentSheet({
     setDate(today);
   }, [open]);
 
-  const value = parseMoney(amount);
+  const value = parseMoneyInput(amount) ?? 0;
   const order = orders.find((o) => o.id === allocation);
+  // Only the order's known balance is allocated; any excess stays on the current account.
+  const allocated = order ? (order.pendingPayment === null ? value : Math.min(value, order.pendingPayment)) : 0;
+  const excess = value - allocated;
 
   const save = async () => {
     setSaving(true);
-    const pendingAfter = order?.pendingPayment !== undefined && order?.pendingPayment !== null ? Math.max(order.pendingPayment - value, 0) : undefined;
-    const interpretation: PaymentInterpretation = {
-      kind: "payment",
-      supplierId: supplier.id,
-      supplierName: supplier.name,
-      amount: value,
-      date,
-      method,
-      allocation: order ? { type: "order", orderId: order.id, orderNumber: order.number } : { type: "unallocated" },
-      preview: { orderPendingBefore: order?.pendingPayment ?? undefined, orderPendingAfter: pendingAfter, supplierBalanceBefore: balance, supplierBalanceAfter: balance - value },
-      flags: [],
-    };
-    await assistant.confirm(`manual-payment-${supplier.id}`, interpretation);
-    await invalidate();
-    setSaving(false);
-    onClose();
-    toast("Pago registrado");
+    try {
+      await payments.create({
+        supplierId: supplier.id,
+        date,
+        amount: value,
+        method,
+        allocations: order && allocated > 0 ? [{ orderId: order.id, amount: allocated }] : [],
+      });
+      await invalidate();
+      onClose();
+      toast("Pago registrado");
+    } catch (error) {
+      toast(errorMessage(error, "No se pudo registrar el pago."), "info");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -224,6 +232,11 @@ export function RegisterPaymentSheet({
           <span className="text-fg-3">→</span>
           <span className="font-mono font-semibold text-fg">{formatMoney(balance - value)}</span>
         </div>
+        {order && excess > 0 && value > 0 ? (
+          <p className="text-[13px] text-fg-3">
+            El pago supera el saldo del pedido {order.number}: {formatMoney(excess)} quedarán sin imputar en la cuenta corriente.
+          </p>
+        ) : null}
       </div>
     </Sheet>
   );
